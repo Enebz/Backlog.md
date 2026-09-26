@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { apiClient } from '../lib/api';
 import { SuccessToast } from './SuccessToast';
 import type { BacklogConfig } from '../../types';
+import { DEFAULT_WEB_USER_NAME, validateWebUserName } from '../../utils/web-user';
 
 const Settings: React.FC = () => {
 	const [config, setConfig] = useState<BacklogConfig | null>(null);
@@ -76,6 +77,11 @@ const Settings: React.FC = () => {
 		// Validate port number
 		if (config.defaultPort && (config.defaultPort < 1 || config.defaultPort > 65535)) {
 			errors.defaultPort = 'Port must be between 1 and 65535';
+		}
+
+		const webUserNameProblem = validateWebUserName(config.webUserName ?? '');
+		if (webUserNameProblem) {
+			errors.webUserName = webUserNameProblem.charAt(0).toUpperCase() + webUserNameProblem.slice(1);
 		}
 
 
@@ -317,6 +323,31 @@ const Settings: React.FC = () => {
 					<div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
 						<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Web UI Settings</h2>
 						<div className="space-y-4">
+							<div>
+								<label htmlFor="webUserName" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+									Your name
+								</label>
+								<input
+									id="webUserName"
+									type="text"
+									value={config.webUserName ?? ''}
+									onChange={(e) => handleInputChange('webUserName', e.target.value)}
+									placeholder={DEFAULT_WEB_USER_NAME}
+									className={`w-full px-3 py-2 border rounded-lg text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200 ${
+										validationErrors.webUserName
+											? 'border-red-500 dark:border-red-400'
+											: 'border-gray-300 dark:border-gray-600'
+									}`}
+								/>
+								{validationErrors.webUserName ? (
+									<p className="mt-1 text-sm text-red-600 dark:text-red-400">{validationErrors.webUserName}</p>
+								) : (
+									<p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+										Comments you post here are signed with this name (web_user_name), and tasks assigned to @{config.webUserName?.trim() || DEFAULT_WEB_USER_NAME} show as yours.
+									</p>
+								)}
+							</div>
+
 							<div>
 								<label htmlFor="defaultPort" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
 									Default Port
