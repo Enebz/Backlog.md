@@ -364,6 +364,51 @@ describe("Config commands", () => {
 		expect(created.task.assignee).toEqual([quoted]);
 	});
 
+	it("round-trips webUserName through config set, get, and list, defaulting to user", async () => {
+		const unset = await $`bun ${CLI_PATH} config get webUserName`.cwd(TEST_DIR).nothrow().quiet();
+		expect(unset.exitCode).toBe(0);
+		expect(unset.stdout.toString().trim()).toBe("user");
+		const defaultList = await $`bun ${CLI_PATH} config list`.cwd(TEST_DIR).nothrow().quiet();
+		expect(defaultList.stdout.toString()).toContain("webUserName: user (default)");
+
+		const set = await $`bun ${CLI_PATH} config set webUserName ${"Magnus O'Brien"}`.cwd(TEST_DIR).nothrow().quiet();
+		expect(set.exitCode).toBe(0);
+		expect(await Bun.file(core.filesystem.configFilePath).text()).toContain(`web_user_name: "Magnus O'Brien"`);
+
+		core.filesystem.invalidateConfigCache();
+		expect((await core.filesystem.loadConfig())?.webUserName).toBe("Magnus O'Brien");
+		const get = await $`bun ${CLI_PATH} config get webUserName`.cwd(TEST_DIR).nothrow().quiet();
+		expect(get.stdout.toString().trim()).toBe("Magnus O'Brien");
+
+		// Saving another key keeps the name.
+		await $`bun ${CLI_PATH} config set defaultPort 7002`.cwd(TEST_DIR).quiet();
+		core.filesystem.invalidateConfigCache();
+		expect((await core.filesystem.loadConfig())?.webUserName).toBe("Magnus O'Brien");
+
+		const cleared = await $`bun ${CLI_PATH} config set webUserName ${""}`.cwd(TEST_DIR).nothrow().quiet();
+		expect(cleared.exitCode).toBe(0);
+		core.filesystem.invalidateConfigCache();
+		expect((await core.filesystem.loadConfig())?.webUserName).toBeUndefined();
+		expect(await Bun.file(core.filesystem.configFilePath).text()).not.toContain("web_user_name");
+	});
+
+	it("refuses a webUserName that could not sign a comment", async () => {
+		const result = await $`bun ${CLI_PATH} config set webUserName ${"me <!-- you"}`.cwd(TEST_DIR).nothrow().quiet();
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr.toString()).toContain("Invalid webUserName");
+		core.filesystem.invalidateConfigCache();
+		expect((await core.filesystem.loadConfig())?.webUserName).toBeUndefined();
+	});
+
+	it("reads web_user_name written plain, single-quoted, double-quoted, or with a trailing comment", () => {
+		const read = (line: string) => core.filesystem.parseConfig(`project_name: "P"\n${line}\n`).webUserName;
+		expect(read("web_user_name: magnus")).toBe("magnus");
+		expect(read("web_user_name: 'O''Brien'")).toBe("O'Brien");
+		expect(read('web_user_name: "magnus" # the person at the board')).toBe("magnus");
+		expect(read("web_user_name: magnus # me")).toBe("magnus");
+		expect(core.filesystem.parseConfig('project_name: "P"\n').webUserName).toBeUndefined();
+	});
+
 	it("refuses to load a list config value that is not valid YAML, naming the file and the key", async () => {
 		const configPath = core.filesystem.configFilePath;
 		const baseConfig = await Bun.file(configPath).text();

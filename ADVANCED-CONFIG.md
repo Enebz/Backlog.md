@@ -14,6 +14,7 @@ For getting started and the interactive wizard overview, see [README.md](README.
 | Enable cross-branch check | `backlog config set checkActiveBranches true` |
 | Set active branch days | `backlog config set activeBranchDays 30` |
 | Set default assignees | `backlog config set defaultAssignee "@alice,@bob"` |
+| Name your web UI comments | `backlog config set webUserName magnus` |
 
 Running `backlog config` with no arguments launches the interactive advanced wizard, including guided Definition of Done defaults editing (add/remove/reorder/clear).
 
@@ -22,6 +23,7 @@ Running `backlog config` with no arguments launches the interactive advanced wiz
 | Key               | Purpose            | Default                       |
 |-------------------|--------------------|-------------------------------|
 | `defaultAssignee` | Assignees for new tasks created without `-a` | `[]`             |
+| `webUserName` (`web_user_name`) | Name the web UI signs comments with, and the person it shows as "You" | `user` |
 | `defaultStatus`   | First column       | `To Do`                       |
 | `definition_of_done` | Default DoD checklist items for new tasks | `(not set)` |
 | `statuses`        | Board columns      | `[To Do, In Progress, Done]`  |
@@ -54,6 +56,8 @@ Running `backlog config` with no arguments launches the interactive advanced wiz
 > **Performance**: Cross-branch checking ensures accurate task tracking across all active branches but may impact performance on large repositories. You can disable it by setting `checkActiveBranches: false` for maximum speed, or adjust `activeBranchDays` to control how far back to look for branch activity (lower values = better performance).
 
 > **Status Change Callbacks**: Set `onStatusChange` to run a shell command whenever a task's status changes. Available variables: `$TASK_ID`, `$OLD_STATUS`, `$NEW_STATUS`, `$TASK_TITLE`. Per-task override via `onStatusChange` in task frontmatter. Example: `'if [ "$NEW_STATUS" = "In Progress" ]; then claude "Task $TASK_ID ($TASK_TITLE) has been assigned to you. Please implement it." & fi'`
+
+> **Web user name**: every comment posted from the web UI is written with `author: <webUserName>` (default `user`), so agents and scripts reading the task files can tell the person at the board from signed CLI comments. The web UI shows that author, and tasks assigned to `@<webUserName>`, as "You". `backlog config get webUserName` prints the name in effect, including the default. CLI and MCP comments are unchanged: they carry an author only when `--comment-author`/`commentAuthor` is given.
 
 > **Default Assignee**: `defaultAssignee` is a list, so `backlog config set defaultAssignee "@alice,@bob"` stores both names. Every create surface (CLI `task create` and `draft create`, the creation wizard, TUI, Web, MCP) applies it when no assignee is supplied. An explicit assignee replaces the default entirely instead of merging with it, and setting the value to an empty string clears the default so new tasks start unassigned. To keep a single task unassigned while the default stays configured, pass an explicit empty assignee: `backlog task create "Title" -a ""`. The same value clears existing assignees on edit: `backlog task edit BACK-1 -a ""` (MCP `task_create`/`task_edit` use an empty `assignee` array). When editing `config.yml` by hand, quote the names (`default_assignee: ["@alice"]`) because `@` starts a reserved YAML character; a value YAML cannot read is ignored rather than guessed at.
 

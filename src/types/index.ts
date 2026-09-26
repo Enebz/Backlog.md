@@ -323,6 +323,8 @@ export interface BacklogConfig {
 	/** Assignees applied to new tasks when none are provided. Empty or unset means no default. */
 	defaultAssignee?: string[];
 	defaultReporter?: string;
+	/** Name the web UI signs its comments with, for the person at the board. Unset means "user". */
+	webUserName?: string;
 	statuses: string[];
 	labels: string[];
 	/** Allowed task types. Defaults to DEFAULT_TASK_TYPES when not configured. */

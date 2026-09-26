@@ -146,6 +146,7 @@ import { formatValidTaskTypeValues, getTaskTypeValues, resolveTaskTypeValues } f
 import { getTerminalStatus, isTerminalStatus } from "./utils/terminal-status.ts";
 import { formatUtcDateForDisplay } from "./utils/utc-date-display.ts";
 import { getVersion } from "./utils/version.ts";
+import { resolveWebUserName, validateWebUserName } from "./utils/web-user.ts";
 
 type IntegrationMode = "mcp" | "cli" | "none";
 
@@ -172,6 +173,7 @@ const CONFIG_GET_KEYS = [
 	"zeroPaddedIds",
 	"checkActiveBranches",
 	"activeBranchDays",
+	"webUserName",
 ] as const;
 
 const CONFIG_SET_KEYS = [
@@ -190,6 +192,7 @@ const CONFIG_SET_KEYS = [
 	"zeroPaddedIds",
 	"checkActiveBranches",
 	"activeBranchDays",
+	"webUserName",
 ] as const;
 
 function normalizeIntegrationOption(value: string): IntegrationMode | null {
@@ -5038,7 +5041,7 @@ agentsCmd
 
 // Config command group
 const CONFIG_AVAILABLE_KEYS =
-	"Available keys: defaultEditor, projectName, defaultAssignee, defaultStatus, statuses, labels, priorities, types, projects, milestones, definitionOfDone, dateFormat, maxColumnWidth, defaultPort, autoOpenBrowser, hideEmptyColumns, remoteOperations, autoCommit, filesystemOnly, bypassGitHooks, zeroPaddedIds, checkActiveBranches, activeBranchDays";
+	"Available keys: defaultEditor, projectName, defaultAssignee, defaultStatus, statuses, labels, priorities, types, projects, milestones, definitionOfDone, dateFormat, maxColumnWidth, defaultPort, autoOpenBrowser, hideEmptyColumns, remoteOperations, autoCommit, filesystemOnly, bypassGitHooks, zeroPaddedIds, checkActiveBranches, activeBranchDays, webUserName";
 
 const configCmd = addHelpSchema(program.command("config"), {
 	reads: "Project Backlog.md configuration",
@@ -5163,6 +5166,10 @@ addHelpSchema(configCmd.command("get <key>"), {
 					break;
 				case "defaultAssignee":
 					console.log(config.defaultAssignee?.join(", ") || "");
+					break;
+				case "webUserName":
+					// The effective name, so scripts can tell web comments from session comments.
+					console.log(resolveWebUserName(config));
 					break;
 				case "defaultStatus":
 					console.log(config.defaultStatus || "");
@@ -5290,6 +5297,16 @@ addHelpSchema(configCmd.command("set <key> <value>"), {
 					// An empty value clears the default; comma-separated values set several assignees.
 					config.defaultAssignee = parseDelimitedStringList(value);
 					break;
+				case "webUserName": {
+					// An empty value clears it, which signs web comments with the default name again.
+					const problem = validateWebUserName(value);
+					if (problem) {
+						console.error(`Invalid webUserName: ${problem}`);
+						process.exit(1);
+					}
+					config.webUserName = value.trim() || undefined;
+					break;
+				}
 				case "defaultStatus":
 					config.defaultStatus = value;
 					break;
@@ -5490,6 +5507,7 @@ addHelpSchema(configCmd.command("list"), {
 			console.log(`  projectName: ${config.projectName}`);
 			console.log(`  defaultEditor: ${config.defaultEditor || "(not set)"}`);
 			console.log(`  defaultAssignee: [${(config.defaultAssignee ?? []).join(", ")}]`);
+			console.log(`  webUserName: ${resolveWebUserName(config)}${config.webUserName?.trim() ? "" : " (default)"}`);
 			console.log(`  defaultStatus: ${config.defaultStatus || "(not set)"}`);
 			console.log(`  statuses: [${config.statuses.join(", ")}]`);
 			console.log(`  labels: [${config.labels.join(", ")}]`);

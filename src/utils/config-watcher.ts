@@ -32,6 +32,7 @@ const RECOGNIZED_CONFIG_KEYS = new Set([
 	"project_name",
 	"default_assignee",
 	"default_reporter",
+	"web_user_name",
 	"default_status",
 	...ARRAY_CONFIG_KEYS,
 	"definition_of_done",

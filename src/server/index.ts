@@ -36,6 +36,7 @@ import { formatValidStatuses, getCanonicalStatuses, getValidStatuses } from "../
 import { isValidTaskId } from "../utils/task-id.ts";
 import { isAmbiguousTaskIdError, LOCAL_TASK_LOOKUP_HINT } from "../utils/task-path.ts";
 import { getVersion } from "../utils/version.ts";
+import { resolveWebUserName, validateWebUserName } from "../utils/web-user.ts";
 
 // Regex pattern to match any prefix (letters followed by dash)
 const PREFIX_PATTERN = /^[a-zA-Z]+-/i;
@@ -1144,10 +1145,12 @@ export class BacklogServer {
 		}
 
 		if ("commentsAppend" in updates && Array.isArray(updates.commentsAppend)) {
+			// Comments made in the browser are signed by the person at the board (web_user_name),
+			// so whoever reads the task file can tell them from a session's signed comments.
 			const author =
 				typeof updates.commentAuthor === "string" && updates.commentAuthor.trim().length > 0
 					? updates.commentAuthor.trim()
-					: undefined;
+					: resolveWebUserName(await this.core.filesystem.loadConfig());
 			updateInput.appendComments = updates.commentsAppend
 				.map((body: unknown) => ({
 					body: String(body ?? "").trim(),
@@ -1516,6 +1519,13 @@ export class BacklogServer {
 
 			if (updatedConfig.defaultPort && (updatedConfig.defaultPort < 1 || updatedConfig.defaultPort > 65535)) {
 				return Response.json({ error: "Port must be between 1 and 65535" }, { status: 400 });
+			}
+
+			if (typeof updatedConfig.webUserName === "string") {
+				const problem = validateWebUserName(updatedConfig.webUserName);
+				if (problem) {
+					return Response.json({ error: problem.charAt(0).toUpperCase() + problem.slice(1) }, { status: 400 });
+				}
 			}
 
 			// Save configuration

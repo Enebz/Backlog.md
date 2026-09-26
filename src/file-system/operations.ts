@@ -68,6 +68,26 @@ interface LockAttemptSettings {
 	retryDelayMs: number;
 }
 
+/**
+ * A single-line YAML string value, quoted or plain, with any trailing comment dropped. Quotes inside
+ * the value (O'Brien) are kept.
+ */
+function unquoteConfigScalar(value: string): string {
+	const doubleQuoted = value.match(/^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$/);
+	if (doubleQuoted) {
+		try {
+			return String(JSON.parse(`"${doubleQuoted[1]}"`));
+		} catch {
+			return doubleQuoted[1] ?? "";
+		}
+	}
+	const singleQuoted = value.match(/^'((?:[^']|'')*)'\s*(?:#.*)?$/);
+	if (singleQuoted) {
+		return (singleQuoted[1] ?? "").replace(/''/g, "'");
+	}
+	return value.replace(/\s+#.*$/, "").trim();
+}
+
 /** Config keys stored as YAML lists. `default_assignee` also accepts a single scalar. */
 type ConfigListKey = "statuses" | "labels" | "types" | "priorities" | "projects" | "default_assignee";
 
@@ -2110,6 +2130,9 @@ ${description || `Milestone: ${title}`}`,
 				case "default_reporter":
 					config.defaultReporter = value.replace(/['"]/g, "");
 					break;
+				case "web_user_name":
+					config.webUserName = unquoteConfigScalar(value);
+					break;
 				case "default_status":
 					config.defaultStatus = value.replace(/['"]/g, "");
 					break;
@@ -2177,6 +2200,7 @@ ${description || `Milestone: ${title}`}`,
 			projectName: config.projectName || "",
 			defaultAssignee: config.defaultAssignee,
 			defaultReporter: config.defaultReporter,
+			webUserName: config.webUserName,
 			statuses: config.statuses || [...DEFAULT_STATUSES],
 			labels: config.labels || [],
 			types: config.types,
@@ -2211,6 +2235,7 @@ ${description || `Milestone: ${title}`}`,
 				? [`default_assignee: [${config.defaultAssignee.map((assignee) => JSON.stringify(assignee)).join(", ")}]`]
 				: []),
 			...(config.defaultReporter ? [`default_reporter: "${config.defaultReporter}"`] : []),
+			...(config.webUserName?.trim() ? [`web_user_name: ${JSON.stringify(config.webUserName.trim())}`] : []),
 			...(config.defaultStatus ? [`default_status: "${config.defaultStatus}"`] : []),
 			`statuses: [${config.statuses.map((s) => `"${s}"`).join(", ")}]`,
 			`labels: [${config.labels.map((l) => `"${l}"`).join(", ")}]`,
