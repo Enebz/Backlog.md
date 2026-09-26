@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { formatStoredDateForCompactDisplay, formatStoredDateForDisplay, parseStoredUtcDate } from "./date-display";
+import {
+	formatStoredDateAsAge,
+	formatStoredDateForCompactDisplay,
+	formatStoredDateForDisplay,
+	parseStoredUtcDate,
+} from "./date-display";
 
 // Every case passes an explicit timeZone so results never depend on the machine running the tests.
 const TOKYO = "Asia/Tokyo"; // UTC+9, no DST
@@ -154,5 +159,27 @@ describe("formatStoredDateForCompactDisplay", () => {
 	it("handles missing and invalid values gracefully", () => {
 		expect(formatStoredDateForCompactDisplay("", { timeZone: TOKYO }, now)).toEqual({ text: "—" });
 		expect(formatStoredDateForCompactDisplay("not-a-date", { timeZone: TOKYO }, now)).toEqual({ text: "not-a-date" });
+	});
+});
+
+describe("formatStoredDateAsAge", () => {
+	const now = new Date("2026-09-26T15:00:00.000Z");
+
+	it("counts minutes and hours within the last day, with the full time on hover", () => {
+		expect(formatStoredDateAsAge("2026-09-26 14:59", { timeZone: TOKYO }, now)).toEqual({
+			text: "1 min ago",
+			title: "2026-09-26 23:59 · 2026-09-26 14:59 (UTC)",
+		});
+		expect(formatStoredDateAsAge("2026-09-26 15:00", { timeZone: TOKYO }, now).text).toBe("just now");
+		expect(formatStoredDateAsAge("2026-09-26 12:10", { timeZone: TOKYO }, now).text).toBe("2h ago");
+	});
+
+	it("shows older and future values as the local date and time", () => {
+		expect(formatStoredDateAsAge("2026-09-24 06:01", { timeZone: TOKYO }, now).text).toBe("2026-09-24 15:01");
+		expect(formatStoredDateAsAge("2026-09-27 06:01", { timeZone: TOKYO }, now).text).toBe("2026-09-27 15:01");
+	});
+
+	it("leaves date-only values unchanged", () => {
+		expect(formatStoredDateAsAge("2026-09-26", { timeZone: TOKYO }, now)).toEqual({ text: "2026-09-26" });
 	});
 });

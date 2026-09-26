@@ -15,6 +15,7 @@ import LoadingSpinner from './components/LoadingSpinner';
 import { SuccessToast } from './components/SuccessToast';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { TaskIdIndexProvider } from './contexts/TaskIdIndexContext';
+import { WebUserProvider } from './contexts/WebUserContext';
 import {
 	type Decision,
 	type DecisionSearchResult,
@@ -40,6 +41,7 @@ import { createUrlPath } from './utils/urlHelpers';
 import { filterKanbanTasks } from './utils/kanban-tasks';
 import { reconcileById } from './utils/reconcile';
 import { parseBrowserLoadingState } from '../utils/browser-loading-state';
+import { resolveWebUserName } from '../utils/web-user';
 
 type TaskRouteNavigationState = {
   taskModalFrom?: string;
@@ -975,6 +977,7 @@ function AppContent() {
 
   return (
     <ThemeProvider>
+      <WebUserProvider value={resolveWebUserName(config)}>
       <TaskIdIndexProvider tasks={tasks}>
       <Routes>
             <Route
@@ -1112,6 +1115,7 @@ function AppContent() {
         />
       )}
       </TaskIdIndexProvider>
+      </WebUserProvider>
     </ThemeProvider>
   );
 }

@@ -92,8 +92,8 @@ describe("Web task popup modified files display", () => {
 		// Long paths break inside their row instead of widening the modal.
 		expect(html).toContain("break-all");
 
-		// Sections rendered after the modified files list are still part of the modal.
-		expect(html).toContain("Acceptance Criteria");
+		// What the side panel shows after the modified files list is still part of the modal.
+		expect(section).toContain("Created:");
 	});
 
 	it("hides add and remove controls for read-only cross-branch tasks", () => {

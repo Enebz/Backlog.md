@@ -122,7 +122,7 @@ describe("Web task popup Final Summary display", () => {
 		expect(html).toContain("PR-style summary");
 	});
 
-	it("renders Comments section in preview when present", () => {
+	it("renders Comments section in preview with the reply box under it", () => {
 		setupDom();
 
 		const task: Task = {
@@ -152,10 +152,13 @@ describe("Web task popup Final Summary display", () => {
 		expect(html).toContain("Comments");
 		expect(html).toContain("@reviewer");
 		expect(html).toContain("Rendered comment body");
-		expect(html).not.toContain("Add comment");
+		// Commenting needs no edit mode, and no author field: the web user signs it.
+		expect(html).toContain('data-reply-box="comment"');
+		expect(html).toContain("Signed as <span");
+		expect(html).not.toContain("placeholder=\"Author\"");
 	});
 
-	it("renders an empty Comments section as read-only in preview", () => {
+	it("renders an empty Comments section with the reply box in preview", () => {
 		setupDom();
 
 		const task: Task = {
@@ -176,7 +179,7 @@ describe("Web task popup Final Summary display", () => {
 
 		expect(html).toContain("Comments");
 		expect(html).toContain("No comments");
-		expect(html).not.toContain("Add comment");
+		expect(html).toContain('data-reply-box="comment"');
 	});
 
 	it("does not render comment form for cross-branch tasks", () => {
@@ -201,10 +204,11 @@ describe("Web task popup Final Summary display", () => {
 		);
 
 		expect(html).toContain("Read-only comment");
-		expect(html).not.toContain("Add comment");
+		expect(html).not.toContain("data-reply-box");
+		expect(html).not.toContain('id="task-reply"');
 	});
 
-	it("shows the comment form while editing an existing task", async () => {
+	it("keeps the reply box in both preview and edit mode", async () => {
 		setupDom();
 
 		const task: Task = {
@@ -231,7 +235,7 @@ describe("Web task popup Final Summary display", () => {
 		});
 
 		expect(container?.textContent).toContain("Visible comment");
-		expect(container?.textContent).not.toContain("Add comment");
+		expect((container as HTMLElement).querySelector("#task-reply")).toBeTruthy();
 
 		const editButton = Array.from((container as HTMLElement).querySelectorAll("button")).find((button) =>
 			button.textContent?.includes("Edit"),
@@ -243,7 +247,8 @@ describe("Web task popup Final Summary display", () => {
 		});
 
 		expect(container?.textContent).toContain("Visible comment");
-		expect(container?.textContent).toContain("Add comment");
+		expect(container?.textContent).toContain("Save");
+		expect((container as HTMLElement).querySelector("#task-reply")).toBeTruthy();
 	});
 
 	it("stays in edit mode after adding a comment and receiving refreshed task data", async () => {
@@ -264,13 +269,13 @@ describe("Web task popup Final Summary display", () => {
 			...task,
 			comments: [
 				...(task.comments ?? []),
-				{ index: 2, author: "@reviewer", createdDate: "2025-01-03 12:00", body: "New comment" },
+				{ index: 2, author: "user", createdDate: "2025-01-03 12:00", body: "New comment" },
 			],
 		};
+		const received: Array<Record<string, unknown>> = [];
 		apiClient.updateTask = async (id, updates) => {
 			expect(id).toBe("TASK-12B");
-			expect(updates.commentsAppend).toEqual(["New comment"]);
-			expect(updates.commentAuthor).toBe("@reviewer");
+			received.push(updates as Record<string, unknown>);
 			return updatedTask;
 		};
 
@@ -297,26 +302,25 @@ describe("Web task popup Final Summary display", () => {
 				await Promise.resolve();
 			});
 
-			const authorInput = (container as HTMLElement).querySelector("input[placeholder='Author']") as HTMLInputElement | null;
-			const commentTextarea = (container as HTMLElement).querySelector(
-				"textarea[placeholder='Add a comment...']",
-			) as HTMLTextAreaElement | null;
-			expect(authorInput).toBeTruthy();
+			const commentTextarea = (container as HTMLElement).querySelector("#task-reply") as HTMLTextAreaElement | null;
 			expect(commentTextarea).toBeTruthy();
 			await act(async () => {
-				setFormValue(authorInput!, "@reviewer");
 				setFormValue(commentTextarea!, "New comment");
 				await Promise.resolve();
 			});
 
-			const addButton = Array.from((container as HTMLElement).querySelectorAll("button")).find((button) =>
-				button.textContent?.includes("Add comment"),
+			const commentButton = Array.from((container as HTMLElement).querySelectorAll("button")).find(
+				(button) => button.textContent?.trim() === "Comment",
 			);
-			expect(addButton).toBeTruthy();
+			expect(commentButton).toBeTruthy();
 			await act(async () => {
-				clickElement(addButton as HTMLButtonElement);
+				clickElement(commentButton as HTMLButtonElement);
 				await Promise.resolve();
 			});
+			await flushReact();
+
+			// The server signs the comment with the configured web user name, so the browser sends no author.
+			expect(received).toEqual([{ commentsAppend: ["New comment"] }]);
 
 			await act(async () => {
 				activeRoot?.render(
@@ -328,8 +332,8 @@ describe("Web task popup Final Summary display", () => {
 			});
 
 			expect(container?.textContent).toContain("New comment");
-			expect(container?.textContent).toContain("Add comment");
 			expect(container?.textContent).toContain("Save");
+			expect((container as HTMLElement).querySelector("#task-reply")).toBeTruthy();
 		} finally {
 			apiClient.updateTask = originalUpdateTask;
 		}

@@ -261,6 +261,17 @@
         overflow-wrap: break-word !important;
     }
 
+    /* A comment's markdown sits on its bubble, which carries the colour. */
+    .comment-body,
+    .comment-body .wmde-markdown {
+        background-color: transparent !important;
+        font-size: 0.875rem;
+    }
+
+    .comment-body .wmde-markdown > :last-child {
+        margin-bottom: 0 !important;
+    }
+
     /* Prevent resizing of the editor's textarea to avoid overlay misalignment */
     .w-md-editor textarea {
         resize: none !important;

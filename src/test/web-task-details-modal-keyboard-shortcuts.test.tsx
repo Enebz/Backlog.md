@@ -138,6 +138,8 @@ describe("Web task popup keyboard shortcuts", () => {
 		const container = await mountModal();
 		const dialog = container.querySelector("[role='dialog']");
 		expect(dialog).toBeTruthy();
+		// The title renames in place: clicking it turns it into an input.
+		await click(container.querySelector("[data-task-title]") as HTMLButtonElement);
 		const contentEditable = document.createElement("div");
 		contentEditable.setAttribute("contenteditable", "true");
 		const contentEditableChild = document.createElement("span");

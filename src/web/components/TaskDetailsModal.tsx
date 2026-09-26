@@ -19,6 +19,21 @@ import { buildTaskIdIndex, resolveTaskReference } from "../utils/task-id-links";
 import { findDirectSubtasks, findParentTask, summarizeSubtaskProgress } from "../../utils/task-subtasks.ts";
 import { isTerminalStatus } from "../../utils/terminal-status.ts";
 import { createUrlPath } from "../utils/urlHelpers";
+import { useWebUserName } from "../contexts/WebUserContext";
+import CommentThread from "./CommentThread";
+import PersonAvatar from "./PersonAvatar";
+import ReplyBox, { type ReplyAction } from "./ReplyBox";
+import {
+  askedBy,
+  decisionKindFor,
+  displayPerson,
+  getWorkflow,
+  hasUserReplied,
+  nextInQueue,
+  parseDecisionOptions,
+  statusQueue,
+  type Workflow,
+} from "../utils/workflow";
 
 interface Props {
   task?: Task | TaskDetail; // Optional for create mode
@@ -54,7 +69,6 @@ type TaskUpdatePayload = Omit<Partial<Task>, "dueDate" | "project"> & {
   definitionOfDoneUncheck?: number[];
   disableDefinitionOfDoneDefaults?: boolean;
   commentsAppend?: string[];
-  commentAuthor?: string;
 };
 
 type InlineMetaUpdatePayload = Omit<Partial<Task>, "milestone"> & {
@@ -140,6 +154,45 @@ const buildTaskDetailsFormState = ({
   dueDate: task?.dueDate || "",
 });
 
+/** A status as a coloured pill: questions amber, approvals green, work in progress blue, done muted. */
+const statusTone = (status: string, workflow: Workflow, statuses: string[]): string => {
+  const normalized = status.trim().toLowerCase();
+  if (workflow.waitingStatus && normalized === workflow.waitingStatus.toLowerCase()) {
+    return "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-200";
+  }
+  if (workflow.approvedStatus && normalized === workflow.approvedStatus.toLowerCase()) {
+    return "border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-200";
+  }
+  if (isTerminalStatus(status, statuses)) {
+    return "border-gray-300 bg-gray-100 text-gray-700 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200";
+  }
+  if (normalized.includes("progress") || normalized.includes("doing")) {
+    return "border-blue-300 bg-blue-50 text-blue-900 dark:border-blue-700 dark:bg-blue-950/50 dark:text-blue-200";
+  }
+  return "border-gray-300 bg-white text-gray-800 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100";
+};
+
+/** One labelled property in the task's side panel. */
+const Field: React.FC<{ label: string; htmlFor?: string; children: React.ReactNode; right?: React.ReactNode }> = ({
+  label,
+  htmlFor,
+  children,
+  right,
+}) => (
+  <div className="space-y-1.5">
+    <div className="flex items-center justify-between">
+      <label htmlFor={htmlFor} className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+        {label}
+      </label>
+      {right ? <span className="text-xs text-gray-500 dark:text-gray-400">{right}</span> : null}
+    </div>
+    {children}
+  </div>
+);
+
+const SIDEBAR_SELECT_CLASS =
+  "w-full h-9 px-2.5 pr-8 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200";
+
 const SectionHeader: React.FC<{ title: string; right?: React.ReactNode }> = ({ title, right }) => (
   <div className="flex items-center justify-between mb-3">
     <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 tracking-tight transition-colors duration-200">
@@ -198,6 +251,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
   dateFormat,
 }) => {
   const { theme } = useTheme();
+  const webUserName = useWebUserName();
   const isCreateMode = !task;
   const isFromOtherBranch = Boolean(task?.branch);
   // Promoting a draft replaces it with a new task ID, which the Drafts page does through its own
@@ -225,10 +279,13 @@ export const TaskDetailsModal: React.FC<Props> = ({
   const [notes, setNotes] = useState(task?.implementationNotes || "");
   const [displayComments, setDisplayComments] = useState<TaskComment[]>(task?.comments ?? []);
   const [commentBody, setCommentBody] = useState("");
-  const [commentAuthor, setCommentAuthor] = useState("");
   const [commentSaving, setCommentSaving] = useState(false);
-  const [commentsChanged, setCommentsChanged] = useState(false);
-  const preserveEditModeAfterCommentRefresh = useRef(false);
+  // What the last decision did, shown on the card that follows it so the move stays visible.
+  const [lastDecision, setLastDecision] = useState<{ id: string; title: string; outcome: string } | null>(null);
+  const replyRef = useRef<HTMLTextAreaElement | null>(null);
+  // The title reads as a wrapping heading; clicking it renames in place.
+  const [renamingTitle, setRenamingTitle] = useState(false);
+  const cancelRenameRef = useRef(false);
   const [finalSummary, setFinalSummary] = useState(task?.finalSummary || "");
   const [criteria, setCriteria] = useState<AcceptanceCriterion[]>(task?.acceptanceCriteriaItems || []);
   const defaultDefinitionOfDone = useMemo(
@@ -514,10 +571,33 @@ export const TaskDetailsModal: React.FC<Props> = ({
         e.stopPropagation();
         void handleComplete();
       }
+      if (!isOpen || !task || e.metaKey || e.ctrlKey || e.altKey) {
+        return;
+      }
+      if (renamingTitle && e.key === "Escape") {
+        // Escape leaves the rename, not the dialog.
+        e.preventDefault();
+        e.stopPropagation();
+        cancelRenameRef.current = true;
+        setTitle(task.title);
+        setRenamingTitle(false);
+        return;
+      }
+      // j/k walk the card's column, r jumps to the reply box.
+      if (e.key === "j" || e.key === "k") {
+        e.preventDefault();
+        e.stopPropagation();
+        openQueueNeighbour(e.key === "j" ? 1 : -1);
+      }
+      if (e.key === "r" && replyRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        replyRef.current.focus();
+      }
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true } as any);
-  }, [mode, title, description, plan, notes, finalSummary, criteria, definitionOfDone, status]);
+  }, [mode, title, description, plan, notes, finalSummary, criteria, definitionOfDone, status, isOpen, task, availableTasks, commentBody, renamingTitle]);
 
   // Reset local state when task changes or modal opens
   useEffect(() => {
@@ -543,7 +623,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
     const shouldPreserveEditMode =
       !isCreateMode &&
       sameOpenModalRefresh &&
-      (modeRef.current === "edit" || preserveEditModeAfterCommentRefresh.current);
+      modeRef.current === "edit";
 
     if (sameOpenModalRefresh && previousFormState) {
       setTitle((current) => preserveDirtyRefreshValue(current, previousFormState.title, nextFormState.title));
@@ -554,7 +634,6 @@ export const TaskDetailsModal: React.FC<Props> = ({
       setNotes((current) => preserveDirtyRefreshValue(current, previousFormState.notes, nextFormState.notes));
       setDisplayComments(nextFormState.displayComments);
       setCommentSaving(false);
-      setCommentsChanged(false);
       setFinalSummary((current) =>
         preserveDirtyRefreshValue(current, previousFormState.finalSummary, nextFormState.finalSummary),
       );
@@ -598,7 +677,6 @@ export const TaskDetailsModal: React.FC<Props> = ({
       );
       setDueDate((current) => preserveDirtyRefreshValue(current, previousFormState.dueDate, nextFormState.dueDate));
       setMode(shouldPreserveEditMode ? "edit" : isCreateMode ? "create" : modeRef.current);
-      preserveEditModeAfterCommentRefresh.current = false;
       previousTaskId.current = nextTaskId;
       previousIsOpen.current = isOpen;
       formBaselineRef.current = nextFormState;
@@ -612,9 +690,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
     setNotes(nextFormState.notes);
     setDisplayComments(nextFormState.displayComments);
     setCommentBody("");
-    setCommentAuthor("");
     setCommentSaving(false);
-    setCommentsChanged(false);
     setFinalSummary(nextFormState.finalSummary);
     setCriteria(nextFormState.criteria);
     setDefinitionOfDone(nextFormState.definitionOfDone);
@@ -630,20 +706,15 @@ export const TaskDetailsModal: React.FC<Props> = ({
     setMilestone(nextFormState.milestone);
     setDueDate(nextFormState.dueDate);
     setMode(isCreateMode ? "create" : "preview");
-    preserveEditModeAfterCommentRefresh.current = false;
+    setRenamingTitle(false);
     previousTaskId.current = nextTaskId;
     previousIsOpen.current = isOpen;
     formBaselineRef.current = nextFormState;
     setError(null);
   }, [task, isOpen, isCreateMode, isDraftMode, availableStatuses, defaultDefinitionOfDone, createModeAssignee]);
 
-  const refreshAfterCommentChange = useCallback(() => {
-    if (!commentsChanged) return;
-    setCommentsChanged(false);
-    if (onSaved) void onSaved();
-  }, [commentsChanged, onSaved]);
-
-  const hasCommentDraft = commentBody.trim() !== "" || commentAuthor.trim() !== "";
+  // The reply box is always there, so an unsent comment is unsaved work in every mode.
+  const hasCommentDraft = commentBody.trim() !== "";
   // Nothing is persisted while creating, so any entered field is unsaved work.
   const hasCreateModeEntries =
     isCreateMode &&
@@ -660,7 +731,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
       references.length > 0 ||
       modifiedFiles.length > 0);
   const hasUnsavedEdits =
-    (mode === "edit" || mode === "create") && (isDirty || hasCommentDraft || hasCreateModeEntries);
+    ((mode === "edit" || mode === "create") && (isDirty || hasCreateModeEntries)) || hasCommentDraft;
 
   // Links inside the modal (dependency chips, auto-linked task IDs in markdown) leave this
   // task behind, so they ask the same question closing does before the navigation happens.
@@ -693,14 +764,11 @@ export const TaskDetailsModal: React.FC<Props> = ({
       setDescription(task?.description || "");
       setPlan(task?.implementationPlan || "");
       setNotes(task?.implementationNotes || "");
-      setCommentBody("");
-      setCommentAuthor("");
       setFinalSummary(task?.finalSummary || "");
       setDueDate(task?.dueDate || "");
       setCriteria(task?.acceptanceCriteriaItems || []);
       setDefinitionOfDone(task?.definitionOfDoneItems || []);
       setMode("preview");
-      refreshAfterCommentChange();
     }
   };
 
@@ -852,7 +920,6 @@ export const TaskDetailsModal: React.FC<Props> = ({
         await apiClient.updateTask(task.id, taskData);
         setMode("preview");
         if (onSaved) await onSaved();
-        setCommentsChanged(false);
       }
     } catch (err) {
       // Extract and display the error message from API response
@@ -979,34 +1046,97 @@ export const TaskDetailsModal: React.FC<Props> = ({
     }
   };
 
-  const handleAddComment = async () => {
-    if (demoting) return;
-    if (!task || isFromOtherBranch) return;
-    const body = commentBody.trim();
-    if (!body) return;
-    const author = commentAuthor.trim();
-    if (containsCommentDelimiterLine(body)) {
-      setError("Comment body cannot contain standalone '---' delimiter lines.");
+  // Statuses other than Draft decide what a card asks of the person at the board.
+  const workflow = useMemo(
+    () => getWorkflow(availableStatuses.filter((candidate) => candidate.trim().toLowerCase() !== "draft")),
+    [availableStatuses],
+  );
+  const decisionKind =
+    task && !isFromOtherBranch && !isOpenDraft && !isDraftMode ? decisionKindFor(task.status, workflow) : null;
+  const decisionOptions = useMemo(
+    () => (decisionKind === "question" ? parseDecisionOptions(task?.description) : []),
+    [decisionKind, task?.description],
+  );
+  // The card's column in board order, to step through it and to find the next card needing a decision.
+  const columnQueue = useMemo(
+    () => (task && !isFromOtherBranch && !isOpenDraft ? statusQueue(availableTasks, task.status) : []),
+    [task, availableTasks, isFromOtherBranch, isOpenDraft],
+  );
+  const queueIndex = task ? columnQueue.findIndex((candidate) => candidate.id === task.id) : -1;
+  const undecidedInColumn = columnQueue.filter((candidate) => !hasUserReplied(candidate, webUserName)).length;
+
+  const confirmDiscardReply = (): boolean => !hasCommentDraft || window.confirm("Discard your unsent comment?");
+
+  const openQueueNeighbour = (step: 1 | -1) => {
+    if (!onNavigateToTask || queueIndex === -1 || columnQueue.length < 2) return;
+    const neighbour = columnQueue[(queueIndex + step + columnQueue.length) % columnQueue.length];
+    if (!neighbour || neighbour.id === task?.id) return;
+    if (mode === "edit" && isDirty && !window.confirm("Discard unsaved changes and leave this task?")) return;
+    if (!confirmDiscardReply()) return;
+    onNavigateToTask(neighbour);
+  };
+
+  useEffect(() => {
+    if (!lastDecision) return;
+    const timer = setTimeout(() => setLastDecision(null), 8000);
+    return () => clearTimeout(timer);
+  }, [lastDecision]);
+
+  /**
+   * Writes a comment, a status move, or both, in one update. A decision or an answer settles the
+   * card, so the next card in its column that still needs one opens (or the dialog closes when none
+   * is left): working through proposals or questions is one card after another.
+   */
+  const handleReply = async ({ body, status: nextStatus, settles }: ReplyAction) => {
+    if (demoting || !task || isFromOtherBranch) return;
+    const comment = body.trim();
+    if (!comment && !nextStatus) return;
+    if (comment && containsCommentDelimiterLine(comment)) {
+      setError("A comment cannot contain a line with only '---' on it.");
       return;
     }
-    if (author && containsCommentDelimiterLine(author)) {
-      setError("Comment author cannot contain standalone '---' delimiter lines.");
-      return;
-    }
+    // Read before the move: once it lands, this card is no longer part of its column.
+    const next =
+      settles && mode === "preview"
+        ? nextInQueue(columnQueue, task.id, (candidate) => !hasUserReplied(candidate, webUserName))
+        : null;
     setCommentSaving(true);
     setError(null);
-    preserveEditModeAfterCommentRefresh.current = true;
     try {
       const updatedTask = await apiClient.updateTask(task.id, {
-        commentsAppend: [body],
-        ...(author.length > 0 && { commentAuthor: author }),
+        ...(comment ? { commentsAppend: [comment] } : {}),
+        ...(nextStatus ? { status: nextStatus } : {}),
       });
-      setDisplayComments(updatedTask.comments ?? []);
-      setCommentsChanged(true);
       setCommentBody("");
-      setCommentAuthor("");
+      setDisplayComments(updatedTask.comments ?? []);
+      if (nextStatus) setStatus(updatedTask.status ?? nextStatus);
+      if (settles) {
+        const outcome =
+          nextStatus && nextStatus === workflow.approvedStatus
+            ? "approved"
+            : nextStatus && nextStatus === workflow.doneStatus
+              ? `declined, moved to ${nextStatus}`
+              : nextStatus
+                ? `moved to ${nextStatus}`
+                : "answered";
+        setLastDecision({ id: task.id, title: task.title, outcome });
+      }
+      if (onSaved) {
+        try {
+          await onSaved();
+        } catch (refreshError) {
+          console.error("The reply was saved, but refreshing task data failed", refreshError);
+        }
+      }
+      if (settles && mode === "preview") {
+        if (next && onNavigateToTask) {
+          onNavigateToTask(next);
+        } else {
+          setLastDecision(null);
+          onClose();
+        }
+      }
     } catch (err) {
-      preserveEditModeAfterCommentRefresh.current = false;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setCommentSaving(false);
@@ -1115,61 +1245,100 @@ export const TaskDetailsModal: React.FC<Props> = ({
 		task && !isDraftMode && !isOpenDraft && isLocalEditableTask(task) && task.source !== "completed" && !isFromOtherBranch,
 	);
   const comments = displayComments;
+  const isPreview = mode === "preview";
 
   const displayId = task?.id ?? "";
   const documentation = task?.documentation ?? [];
+  const requesters = askedBy(labels);
+  const lastDecisionTask = lastDecision ? availableTasks.find((candidate) => candidate.id === lastDecision.id) : undefined;
 
   return (
     <Modal
       isOpen={isOpen}
       onClose={() => {
 		if (demoting) return;
-        // When in edit mode, confirm closing if dirty
+        // Closing drops unsaved edits and an unsent comment, so both ask first.
         if (mode === "edit" && isDirty) {
           if (!window.confirm("Discard unsaved changes and close?")) return;
+        } else if (!confirmDiscardReply()) {
+          return;
         }
-        refreshAfterCommentChange();
+        setLastDecision(null);
         onClose();
       }}
-      title={isCreateMode ? (isDraftMode ? "Create New Draft" : "Create New Task") : `${displayId} — ${task.title}`}
+      title={
+        isCreateMode ? (
+          isDraftMode ? "Create New Draft" : "Create New Task"
+        ) : (
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="font-mono text-sm font-medium text-gray-500 dark:text-gray-400">{displayId}</span>
+            <span className="sr-only"> — {task.title}</span>
+          </span>
+        )
+      }
       maxWidthClass="max-w-5xl"
       disableEscapeClose={mode === "edit" || mode === "create" || demoting}
       actions={
-		<div className="flex flex-nowrap items-center justify-end gap-2">
-		          {isDoneStatus && mode === "preview" && !isCreateMode && !isFromOtherBranch && (
+		<div className="flex flex-wrap items-center justify-end gap-2">
+		          {task && !isCreateMode && (
+		            <StatusSelect
+		              current={status}
+		              statuses={availableStatuses}
+		              onChange={(val) => handleInlineMetaUpdate({ status: val })}
+		              disabled={isFromOtherBranch || isOpenDraft}
+		              className={`h-9 rounded-circle border px-3 pr-8 text-sm font-medium ${statusTone(status, workflow, availableStatuses)}`}
+		            />
+		          )}
+		          {task && queueIndex !== -1 && columnQueue.length > 1 && (
+		            <div
+		              className="inline-flex h-9 items-center rounded-lg border border-gray-200 bg-white dark:border-gray-600 dark:bg-gray-800"
+		              role="group"
+		              aria-label={`${task.status}: card ${queueIndex + 1} of ${columnQueue.length}`}
+		            >
+		              <button
+		                type="button"
+		                onClick={() => openQueueNeighbour(-1)}
+		                className="flex h-full items-center rounded-l-lg px-2 text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-100"
+		                aria-label="Previous card in this column"
+		                title="Previous card in this column (k)"
+		              >
+		                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+		                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+		                </svg>
+		              </button>
+		              <span className="px-1 text-xs tabular-nums text-gray-600 dark:text-gray-300">
+		                {queueIndex + 1}/{columnQueue.length}
+		              </span>
+		              <button
+		                type="button"
+		                onClick={() => openQueueNeighbour(1)}
+		                className="flex h-full items-center rounded-r-lg px-2 text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-100"
+		                aria-label="Next card in this column"
+		                title="Next card in this column (j)"
+		              >
+		                <HierarchyChevron />
+		              </button>
+		            </div>
+		          )}
+		          {isDoneStatus && isPreview && !isCreateMode && !isFromOtherBranch && (
 		            <button
 		              onClick={handleComplete}
 		              disabled={demoting}
-		              className="inline-flex items-center px-3 py-2 sm:px-4 rounded-lg text-sm font-medium text-white bg-emerald-600 dark:bg-emerald-700 hover:bg-emerald-700 dark:hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:focus:ring-emerald-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
+		              className="inline-flex h-9 items-center px-3 rounded-lg text-sm font-medium text-white bg-emerald-600 dark:bg-emerald-700 hover:bg-emerald-700 dark:hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:focus:ring-emerald-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
 		              title="Move to completed folder (removes from board)"
 		            >
 		              <span className="sm:hidden">Complete</span>
 		              <span className="hidden sm:inline">Mark as completed</span>
 		            </button>
 		          )}
-		          {canDemote && mode === "preview" && (
-		            <button
-		              onClick={() => void handleDemote()}
-		              disabled={demoting}
-		              className="inline-flex items-center px-3 py-2 sm:px-4 rounded-lg text-sm font-medium text-white bg-amber-500 dark:bg-amber-600 hover:bg-amber-600 dark:hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:focus:ring-amber-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-50"
-		              title="Move task to drafts"
-		            >
-		              {demoting ? "Demoting…" : (
-		                <>
-		                  <span className="sm:hidden">Demote</span>
-		                  <span className="hidden sm:inline">Demote to draft</span>
-		                </>
-		              )}
-		            </button>
-		          )}
-		          {mode === "preview" && !isCreateMode && !isFromOtherBranch ? (
+		          {isPreview && !isCreateMode && !isFromOtherBranch ? (
 		            <button
 		              onClick={() => setMode("edit")}
 		              disabled={demoting}
-		              className="inline-flex items-center px-3 py-2 sm:px-4 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
-		              title="Edit"
+		              className="inline-flex h-9 items-center px-3 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
+		              title="Edit description, checklists, plan and notes (e)"
 		            >
-              <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                       d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
@@ -1180,7 +1349,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 	              <button
 		                onClick={handleCancelEdit}
 		                disabled={demoting}
-		                className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
+		                className="inline-flex h-9 items-center px-3 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"
 		                title="Cancel"
 		              >
                 <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -1191,8 +1360,8 @@ export const TaskDetailsModal: React.FC<Props> = ({
 	              <button
 		                onClick={() => void handleSave()}
 		                disabled={saving || demoting}
-		                className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 dark:bg-blue-700 hover:bg-blue-700 dark:hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200 disabled:opacity-50"
-		                title="Save"
+		                className="inline-flex h-9 items-center px-3 rounded-lg text-sm font-medium text-white bg-blue-600 dark:bg-blue-700 hover:bg-blue-700 dark:hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200 disabled:opacity-50"
+		                title="Save (Ctrl+S)"
 		              >
                 <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -1205,7 +1374,32 @@ export const TaskDetailsModal: React.FC<Props> = ({
       }
     >
       {error && (
-        <div role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</div>
+        <div role="alert" className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">{error}</div>
+      )}
+
+      {lastDecision && lastDecision.id !== task?.id && (
+        <div
+          role="status"
+          className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+        >
+          <span className="min-w-0">
+            <span className="font-mono">{lastDecision.id}</span> {lastDecision.outcome}.
+            {task && queueIndex !== -1 ? ` ${undecidedInColumn} left in ${task.status}.` : ""}
+          </span>
+          {lastDecisionTask && onNavigateToTask && (
+            <button
+              type="button"
+              className="shrink-0 font-medium underline decoration-emerald-400 underline-offset-2 hover:no-underline focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              onClick={() => {
+                if (!confirmDiscardReply()) return;
+                setLastDecision(null);
+                onNavigateToTask(lastDecisionTask);
+              }}
+            >
+              Open {lastDecision.id}
+            </button>
+          )}
+        </div>
       )}
 
 		<fieldset disabled={demoting} className="contents" aria-busy={demoting}>
@@ -1259,11 +1453,13 @@ export const TaskDetailsModal: React.FC<Props> = ({
         </nav>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6" onClickCapture={confirmNavigationAwayFromEdits}>
+      <div
+        className="grid grid-cols-1 gap-6 md:grid-cols-[minmax(0,1fr)_17rem]"
+        onClickCapture={confirmNavigationAwayFromEdits}
+      >
         {/* Main content */}
-        <div className="md:col-span-2 space-y-6">
-          {/* Title field for create mode */}
-          {isCreateMode && (
+        <div className="min-w-0 space-y-6">
+          {isCreateMode ? (
             <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
               <SectionHeader title="Title" />
               <input
@@ -1274,11 +1470,90 @@ export const TaskDetailsModal: React.FC<Props> = ({
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200"
               />
             </div>
-          )}
+          ) : task ? (
+            <div>
+              {isPreview && !renamingTitle ? (
+                <button
+                  type="button"
+                  onClick={() => setRenamingTitle(true)}
+                  disabled={isFromOtherBranch}
+                  aria-label={`Rename: ${title}`}
+                  title={isFromOtherBranch ? undefined : "Click to rename"}
+                  className="group -mx-2 block w-[calc(100%+1rem)] rounded-md border border-transparent px-2 py-1 text-left text-xl font-semibold leading-snug break-words text-gray-900 transition-colors duration-150 hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500/40 disabled:cursor-default disabled:hover:border-transparent dark:text-gray-100 dark:hover:border-gray-600"
+                  data-task-title
+                >
+                  {title}
+                  {!isFromOtherBranch && (
+                    <svg className="ml-2 inline h-4 w-4 align-baseline text-gray-400 opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                    </svg>
+                  )}
+                </button>
+              ) : (
+                <>
+                  <label htmlFor="task-title-input" className="sr-only">
+                    Title
+                  </label>
+                  <input
+                    id="task-title-input"
+                    type="text"
+                    value={title}
+                    // biome-ignore lint/a11y/noAutofocus: the person just asked to rename.
+                    autoFocus={renamingTitle}
+                    onChange={(e) => {
+                      setTitle(e.target.value);
+                    }}
+                    onBlur={() => {
+                      const cancelled = cancelRenameRef.current;
+                      cancelRenameRef.current = false;
+                      setRenamingTitle(false);
+                      if (!cancelled && title.trim() && title !== task.title) {
+                        void handleInlineMetaUpdate({ title: title.trim() });
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    disabled={isFromOtherBranch}
+                    className="-mx-2 w-[calc(100%+1rem)] rounded-md border border-blue-500 bg-white px-2 py-1 text-xl font-semibold leading-snug text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:bg-gray-900 dark:text-gray-100"
+                  />
+                </>
+              )}
+              {(requesters.length > 0 || assignee.length > 0) && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-gray-600 dark:text-gray-300">
+                  {requesters.length > 0 && (
+                    <span className="inline-flex flex-wrap items-center gap-1.5" data-asked-by={requesters.join(",")}>
+                      <span className="text-gray-500 dark:text-gray-400">Asked by</span>
+                      {requesters.map((name) => (
+                        <span key={name} className="inline-flex items-center gap-1 font-medium text-gray-800 dark:text-gray-100">
+                          <PersonAvatar name={name} webUserName={webUserName} size="xs" />
+                          {displayPerson(name, webUserName)}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                  {assignee.length > 0 && (
+                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                      <span className="text-gray-500 dark:text-gray-400">Assigned to</span>
+                      {assignee.map((name) => (
+                        <span key={name} className="inline-flex items-center gap-1 font-medium text-gray-800 dark:text-gray-100">
+                          <PersonAvatar name={name} webUserName={webUserName} size="xs" />
+                          {displayPerson(name, webUserName)}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : null}
+
           {/* Description */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+          <section className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
             <SectionHeader title="Description" />
-            {mode === "preview" ? (
+            {isPreview ? (
               description ? (
                 <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
                   <MermaidMarkdown source={description} />
@@ -1297,7 +1572,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
                 />
               </div>
             )}
-          </div>
+          </section>
 
           {subtasks.length > 0 && (
             <section className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
@@ -1350,244 +1625,68 @@ export const TaskDetailsModal: React.FC<Props> = ({
             </section>
           )}
 
-          {/* References */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title="References" />
-            <div className="space-y-3">
-              {references.length > 0 ? (
+          {/* Acceptance Criteria: shown when there are any, always while editing */}
+          {(!isPreview || totalCount > 0) && (
+            <section className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+              <SectionHeader
+                title={`Acceptance Criteria ${totalCount ? `(${checkedCount}/${totalCount})` : ""}`}
+              />
+              {isPreview ? (
                 <ul className="space-y-2">
-                  {references.map((ref, idx) => (
-                    <li key={idx} className="flex items-center gap-3 group">
-                      <span className="flex-1 min-w-0">
-                        {ref.startsWith("http://") || ref.startsWith("https://") ? (
-                          <a
-                            href={ref}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-sm text-blue-600 dark:text-blue-400 hover:underline break-all"
-                          >
-                            {ref}
-                          </a>
-                        ) : (
-                          <code className="text-sm font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded break-all">
-                            {ref}
-                          </code>
-                        )}
+                  {(criteria || []).map((c) => (
+                    <li key={c.index} className="flex items-start gap-2 rounded-md px-2 py-1">
+                      <input
+                        type="checkbox"
+                        checked={c.checked}
+                        onChange={(e) => void handleToggleCriterion(c.index, e.target.checked)}
+                        aria-label={`Acceptance criterion ${c.index}`}
+                        className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      />
+                      <span className="mt-0.5 w-8 shrink-0 text-right font-mono text-xs font-semibold text-gray-500 dark:text-gray-400">
+                        {`#${c.index}`}
                       </span>
-                      {!isFromOtherBranch && (
-                        <button
-                          onClick={() => {
-                            const newRefs = references.filter((_, i) => i !== idx);
-                            handleInlineMetaUpdate({ references: newRefs });
-                          }}
-                          className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0"
-                          title="Remove reference"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      )}
+                      <div className="text-sm text-gray-800 dark:text-gray-100">{c.text}</div>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="text-sm text-gray-500 dark:text-gray-400">No references</p>
+                <AcceptanceCriteriaEditor criteria={criteria} onChange={setCriteria} />
               )}
-              {mode === "preview" && !isFromOtherBranch && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const input = e.currentTarget.elements.namedItem("newRef") as HTMLInputElement;
-                    const value = input.value.trim();
-                    if (value && !references.includes(value)) {
-                      handleInlineMetaUpdate({ references: [...references, value] });
-                      input.value = "";
-                    }
-                  }}
-                  className="flex gap-2"
-                >
-                  <input
-                    name="newRef"
-                    type="text"
-                    placeholder="URL or file path..."
-                    className="flex-1 text-sm px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2 text-sm font-medium bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors"
-                  >
-                    Add
-                  </button>
-                </form>
-              )}
-            </div>
-          </div>
-
-          {/* Modified files */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title={`Modified files${modifiedFiles.length ? ` (${modifiedFiles.length})` : ""}`} />
-            <div className="space-y-3">
-              {modifiedFiles.length > 0 ? (
-                // A finished task can list hundreds of paths, so the list scrolls inside the
-                // section instead of pushing the sections below it out of reach.
-                <ul className="space-y-2 max-h-64 overflow-y-auto overscroll-contain pr-1">
-                  {modifiedFiles.map((file, idx) => (
-                    <li key={idx} className="flex items-start gap-3 group">
-                      <span className="flex-1 min-w-0">
-                        <code className="text-sm font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded break-all">
-                          {file}
-                        </code>
-                      </span>
-                      {!isFromOtherBranch && (
-                        <button
-                          onClick={() => {
-                            const newFiles = modifiedFiles.filter((_, i) => i !== idx);
-                            handleInlineMetaUpdate({ modifiedFiles: newFiles });
-                          }}
-                          className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0 mt-0.5"
-                          title="Remove modified file"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-gray-500 dark:text-gray-400">No modified files</p>
-              )}
-              {mode === "preview" && !isFromOtherBranch && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const input = e.currentTarget.elements.namedItem("newModifiedFile") as HTMLInputElement;
-                    const value = input.value.trim();
-                    if (value && !modifiedFiles.includes(value)) {
-                      handleInlineMetaUpdate({ modifiedFiles: [...modifiedFiles, value] });
-                      input.value = "";
-                    }
-                  }}
-                  className="flex gap-2"
-                >
-                  <input
-                    name="newModifiedFile"
-                    type="text"
-                    placeholder="Path from project root..."
-                    className="flex-1 text-sm px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2 text-sm font-medium bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors"
-                  >
-                    Add
-                  </button>
-                </form>
-              )}
-            </div>
-          </div>
-
-          {/* Documentation */}
-          {documentation.length > 0 && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-              <SectionHeader title="Documentation" />
-              <div className="space-y-2">
-                <ul className="space-y-2">
-                  {documentation.map((doc, idx) => (
-                    <li key={idx} className="flex items-center gap-3">
-                      <span className="flex-1 min-w-0">
-                        {doc.startsWith("http://") || doc.startsWith("https://") ? (
-                          <a
-                            href={doc}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-sm text-blue-600 dark:text-blue-400 hover:underline break-all"
-                          >
-                            {doc}
-                          </a>
-                        ) : (
-                          <code className="text-sm font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded break-all">
-                            {doc}
-                          </code>
-                        )}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
+            </section>
           )}
 
-          {/* Acceptance Criteria */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader
-              title={`Acceptance Criteria ${totalCount ? `(${checkedCount}/${totalCount})` : ""}`}
-              right={mode === "preview" ? (
-                <span>Toggle to update</span>
-              ) : null}
-            />
-            {mode === "preview" ? (
-              <ul className="space-y-2">
-                {(criteria || []).map((c) => (
-                  <li key={c.index} className="flex items-start gap-2 rounded-md px-2 py-1">
-                    <input
-                      type="checkbox"
-                      checked={c.checked}
-                      onChange={(e) => void handleToggleCriterion(c.index, e.target.checked)}
-                      className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <span className="mt-0.5 w-8 shrink-0 text-right font-mono text-xs font-semibold text-gray-500 dark:text-gray-400">
-                      {`#${c.index}`}
-                    </span>
-                    <div className="text-sm text-gray-800 dark:text-gray-100">{c.text}</div>
-                  </li>
-                ))}
-                {totalCount === 0 && (
-                  <li className="text-sm text-gray-500 dark:text-gray-400">No acceptance criteria</li>
-                )}
-              </ul>
-            ) : (
-              <AcceptanceCriteriaEditor criteria={criteria} onChange={setCriteria} />
-            )}
-          </div>
-
           {/* Definition of Done */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader
-              title={`Definition of Done ${definitionTotalCount ? `(${definitionCheckedCount}/${definitionTotalCount})` : ""}`}
-              right={mode === "preview" ? (
-                <span>Toggle to update</span>
-              ) : null}
-            />
-            {mode === "preview" ? (
-              <ul className="space-y-2">
-                {(definitionOfDone || []).map((item) => (
-                  <li key={item.index} className="flex items-start gap-2 rounded-md px-2 py-1">
-                    <input
-                      type="checkbox"
-                      checked={item.checked}
-                      onChange={(e) => void handleToggleDefinitionOfDone(item.index, e.target.checked)}
-                      className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <div className="text-sm text-gray-800 dark:text-gray-100">{item.text}</div>
-                  </li>
-                ))}
-                {definitionTotalCount === 0 && (
-                  <li className="text-sm text-gray-500 dark:text-gray-400">No Definition of Done items</li>
-                )}
-              </ul>
-            ) : (
-              <AcceptanceCriteriaEditor
-                criteria={definitionOfDone}
-                onChange={setDefinitionOfDone}
-                label="Definition of Done"
-                preserveIndices
-                disableToggle={isCreateMode}
+          {(!isPreview || definitionTotalCount > 0) && (
+            <section className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+              <SectionHeader
+                title={`Definition of Done ${definitionTotalCount ? `(${definitionCheckedCount}/${definitionTotalCount})` : ""}`}
               />
-            )}
-          </div>
+              {isPreview ? (
+                <ul className="space-y-2">
+                  {(definitionOfDone || []).map((item) => (
+                    <li key={item.index} className="flex items-start gap-2 rounded-md px-2 py-1">
+                      <input
+                        type="checkbox"
+                        checked={item.checked}
+                        onChange={(e) => void handleToggleDefinitionOfDone(item.index, e.target.checked)}
+                        aria-label={`Definition of Done item ${item.index}`}
+                        className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      />
+                      <div className="text-sm text-gray-800 dark:text-gray-100">{item.text}</div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <AcceptanceCriteriaEditor
+                  criteria={definitionOfDone}
+                  onChange={setDefinitionOfDone}
+                  label="Definition of Done"
+                  preserveIndices
+                  disableToggle={isCreateMode}
+                />
+              )}
+            </section>
+          )}
 
           {dependencyGraph && dependencyGraph.nodes.length > 1 && (
             <section className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
@@ -1597,111 +1696,83 @@ export const TaskDetailsModal: React.FC<Props> = ({
           )}
 
           {/* Implementation Plan */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title="Implementation Plan" />
-            {mode === "preview" ? (
-              plan ? (
+          {(!isPreview || plan) && (
+            <section className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+              <SectionHeader title="Implementation Plan" />
+              {isPreview ? (
                 <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
                   <MermaidMarkdown source={plan} />
                 </div>
               ) : (
-                <div className="text-sm text-gray-500 dark:text-gray-400">No plan</div>
-              )
-            ) : (
-              <div className="border border-gray-200 dark:border-gray-700 rounded-md">
-                <MDEditor
-                  value={plan}
-                  onChange={(val) => setPlan(val || "")}
-                  preview="edit"
-                  height={280}
-                  data-color-mode={theme}
-                />
-              </div>
-            )}
-          </div>
+                <div className="border border-gray-200 dark:border-gray-700 rounded-md">
+                  <MDEditor
+                    value={plan}
+                    onChange={(val) => setPlan(val || "")}
+                    preview="edit"
+                    height={280}
+                    data-color-mode={theme}
+                  />
+                </div>
+              )}
+            </section>
+          )}
 
           {/* Implementation Notes */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-            <SectionHeader title="Implementation Notes" />
-            {mode === "preview" ? (
-              notes ? (
+          {(!isPreview || notes) && (
+            <section className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+              <SectionHeader title="Implementation Notes" />
+              {isPreview ? (
                 <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
                   <MermaidMarkdown source={notes} />
                 </div>
               ) : (
-                <div className="text-sm text-gray-500 dark:text-gray-400">No notes</div>
-              )
-            ) : (
-              <div className="border border-gray-200 dark:border-gray-700 rounded-md">
-                <MDEditor
-                  value={notes}
-                  onChange={(val) => setNotes(val || "")}
-                  preview="edit"
-                  height={280}
-                  data-color-mode={theme}
-                />
-              </div>
-            )}
-          </div>
+                <div className="border border-gray-200 dark:border-gray-700 rounded-md">
+                  <MDEditor
+                    value={notes}
+                    onChange={(val) => setNotes(val || "")}
+                    preview="edit"
+                    height={280}
+                    data-color-mode={theme}
+                  />
+                </div>
+              )}
+            </section>
+          )}
 
-          {/* Comments */}
-          {!isCreateMode && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
-              <SectionHeader title={`Comments${comments.length ? ` (${comments.length})` : ""}`} />
-              {comments.length > 0 ? (
-                <div className="space-y-4">
-                  {comments.map((comment) => (
-                    <article key={`${comment.index}-${comment.createdDate}`} className="border-l-2 border-gray-200 dark:border-gray-700 pl-3">
-                      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                        <span className="font-semibold text-gray-700 dark:text-gray-200">#{comment.index}</span>
-                        {comment.author ? <span>{comment.author}</span> : null}
-                        {comment.createdDate ? <StoredDate value={comment.createdDate} dateFormat={dateFormat} /> : null}
-                      </div>
-                      <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
-                        <MermaidMarkdown source={comment.body} />
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-sm text-gray-500 dark:text-gray-400">No comments</div>
-              )}
-              {mode === "edit" && !isFromOtherBranch && (
-                <div className="mt-4 space-y-2">
-                  <input
-                    type="text"
-                    value={commentAuthor}
-                    onChange={(e) => setCommentAuthor(e.target.value)}
-                    placeholder="Author"
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent transition-colors duration-200"
-                  />
-                  <textarea
-                    value={commentBody}
-                    onChange={(e) => setCommentBody(e.target.value)}
-                    rows={4}
-                    placeholder="Add a comment..."
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
-                  />
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={() => void handleAddComment()}
-                      disabled={commentSaving || commentBody.trim().length === 0}
-                      className="px-4 py-2 text-sm font-medium bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors disabled:opacity-50"
-                    >
-                      {commentSaving ? "Adding..." : "Add comment"}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+          {/* Documentation */}
+          {documentation.length > 0 && (
+            <section className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+              <SectionHeader title="Documentation" />
+              <ul className="space-y-2">
+                {documentation.map((doc, idx) => (
+                  <li key={idx} className="flex items-center gap-3">
+                    <span className="flex-1 min-w-0">
+                      {doc.startsWith("http://") || doc.startsWith("https://") ? (
+                        <a
+                          href={doc}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-blue-600 dark:text-blue-400 hover:underline break-all"
+                        >
+                          {doc}
+                        </a>
+                      ) : (
+                        <code className="text-sm font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded break-all">
+                          {doc}
+                        </code>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
 
           {/* Final Summary */}
-          {(mode !== "preview" || finalSummary.trim().length > 0) && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+          {(!isPreview || finalSummary.trim().length > 0) && (
+            <section className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
               <SectionHeader title="Final Summary" right="Completion summary" />
-              {mode === "preview" ? (
+              {isPreview ? (
                 <div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
                   <MermaidMarkdown source={finalSummary} />
                 </div>
@@ -1719,248 +1790,401 @@ export const TaskDetailsModal: React.FC<Props> = ({
                   />
                 </div>
               )}
-            </div>
+            </section>
+          )}
+
+          {/* Comments: the conversation, and the reply box under it in every mode */}
+          {!isCreateMode && (
+            <section className="space-y-4" aria-labelledby="task-comments-heading">
+              <div className="flex items-center justify-between">
+                <h3 id="task-comments-heading" className="text-sm font-semibold tracking-tight text-gray-900 dark:text-gray-100">
+                  {`Comments${comments.length ? ` (${comments.length})` : ""}`}
+                </h3>
+                {!isFromOtherBranch && (
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                    <kbd className="rounded border border-gray-300 px-1 font-sans dark:border-gray-600">r</kbd> to reply
+                  </span>
+                )}
+              </div>
+              <CommentThread comments={comments} webUserName={webUserName} theme={theme} dateFormat={dateFormat} />
+              {!isFromOtherBranch && (
+                <ReplyBox
+                  kind={isPreview ? decisionKind : null}
+                  options={decisionOptions}
+                  approvedStatus={workflow.approvedStatus}
+                  declineStatus={workflow.doneStatus}
+                  value={commentBody}
+                  onChange={setCommentBody}
+                  onSubmit={handleReply}
+                  busy={commentSaving || demoting}
+                  webUserName={webUserName}
+                  textareaRef={replyRef}
+                />
+              )}
+            </section>
           )}
         </div>
 
-        {/* Sidebar */}
-        <div className="md:col-span-1 space-y-4">
-          {/* Dates */}
-	          {task && (
-	            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-	              <div><span className="font-semibold text-gray-800 dark:text-gray-100">Created:</span> <StoredDate value={task.createdDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
-	              {task.updatedDate && (
-	                <div><span className="font-semibold text-gray-800 dark:text-gray-100">Updated:</span> <StoredDate value={task.updatedDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
-	              )}
-	              {task.dueDate && mode === "preview" && (
-	                <div><span className="font-semibold text-gray-800 dark:text-gray-100">Due:</span> <StoredDate value={task.dueDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
-	              )}
-	            </div>
-	          )}
-          {mode !== "preview" && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-              <SectionHeader title="Due" />
-              <input
-                type="date"
-                value={dueDate}
-                onChange={(event) => setDueDate(event.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-              />
-            </div>
-          )}
-          {/* Title (editable for existing tasks) */}
-          {task && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-              <SectionHeader title="Title" />
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                }}
-                onBlur={() => {
-                  if (title.trim() && title !== task.title) {
-                    void handleInlineMetaUpdate({ title: title.trim() });
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.currentTarget.blur();
-                  }
-                }}
+        {/* Properties */}
+        <aside className="min-w-0 space-y-4" aria-label="Task properties">
+          <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+            {isCreateMode && (
+              <Field label="Status">
+                <StatusSelect
+                  current={status}
+                  statuses={availableStatuses}
+                  onChange={(val) => handleInlineMetaUpdate({ status: val })}
+                  disabled={isFromOtherBranch || isOpenDraft}
+                />
+              </Field>
+            )}
+
+            <Field label="Assignee" htmlFor="chip-input-assignee">
+              <ChipInput
+                name="assignee"
+                label=""
+                value={assignee}
+                onChange={(value) => handleInlineMetaUpdate({ assignee: value })}
+                placeholder="@name, then Enter"
                 disabled={isFromOtherBranch}
-                className={`w-full h-10 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
               />
-            </div>
-          )}
+            </Field>
 
-          {/* Status */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Status" />
-            <StatusSelect current={status} onChange={(val) => handleInlineMetaUpdate({ status: val })} disabled={isFromOtherBranch || isOpenDraft} />
-          </div>
+            <Field label="Labels" htmlFor="chip-input-labels">
+              <ChipInput
+                name="labels"
+                label=""
+                value={labels}
+                onChange={(value) => handleInlineMetaUpdate({ labels: value })}
+                placeholder="Label, then Enter"
+                disabled={isFromOtherBranch}
+              />
+            </Field>
 
-          {/* Type */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Type" />
-            <select
-              aria-label="Task type"
-              aria-invalid={typeUpdateError ? true : undefined}
-              aria-describedby={typeUpdateError ? "task-type-update-error" : undefined}
-              className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch || isTypeUpdating ? 'opacity-60 cursor-not-allowed' : ''}`}
-              value={typeSelectionValue}
-              onChange={(event) => void handleTaskTypeChange(event.target.value)}
-              disabled={isFromOtherBranch || isTypeUpdating}
-            >
-              <option value="">No type</option>
-              {!canonicalTypeSelection && taskType.trim() ? (
-                <option value={taskType}>{taskType} (not configured)</option>
-              ) : null}
-              {typeOptions.map((typeOption) => (
-                <option key={typeOption} value={typeOption}>
-                  {typeOption}
-                </option>
-              ))}
-            </select>
-            {typeUpdateError ? (
-              <p id="task-type-update-error" role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
-                {typeUpdateError}
-              </p>
-            ) : null}
-          </div>
-
-          {/* Assignee */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Assignee" />
-            <ChipInput
-              name="assignee"
-              label=""
-              value={assignee}
-              onChange={(value) => handleInlineMetaUpdate({ assignee: value })}
-              placeholder="Type name and press Enter"
-              disabled={isFromOtherBranch}
-            />
-          </div>
-
-          {/* Labels */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Labels" />
-            <ChipInput
-              name="labels"
-              label=""
-              value={labels}
-              onChange={(value) => handleInlineMetaUpdate({ labels: value })}
-              placeholder="Type label and press Enter or comma"
-              disabled={isFromOtherBranch}
-            />
-          </div>
-
-          {/* Priority */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Priority" />
-            <select
-              className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
-              value={priority}
-              onChange={(e) => handleInlineMetaUpdate({ priority: e.target.value as any })}
-              disabled={isFromOtherBranch}
-            >
-              <option value="">No Priority</option>
-              {priorityOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Project */}
-          {projectOptions.length > 0 && (
-            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-              <SectionHeader title="Project" />
+            <Field label="Priority">
               <select
-                className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
-                aria-label="Task project"
-                value={projectSelectionValue}
-                onChange={(e) => handleInlineMetaUpdate({ project: e.target.value })}
+                aria-label="Priority"
+                className={`${SIDEBAR_SELECT_CLASS} ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
+                value={priority}
+                onChange={(e) => handleInlineMetaUpdate({ priority: e.target.value as any })}
                 disabled={isFromOtherBranch}
               >
-                <option value="">No Project</option>
-                {!canonicalProjectSelection && project.trim() ? (
-                  <option value={project}>{project} (not configured)</option>
-                ) : null}
-                {projectOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
+                <option value="">No Priority</option>
+                {priorityOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
                   </option>
                 ))}
               </select>
-            </div>
-          )}
+            </Field>
 
-          {/* Milestone */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Milestone" />
-            <select
-              className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
-              value={milestoneSelectionValue}
+            <Field label="Type">
+              <select
+                aria-label="Task type"
+                aria-invalid={typeUpdateError ? true : undefined}
+                aria-describedby={typeUpdateError ? "task-type-update-error" : undefined}
+                className={`${SIDEBAR_SELECT_CLASS} ${isFromOtherBranch || isTypeUpdating ? 'opacity-60 cursor-not-allowed' : ''}`}
+                value={typeSelectionValue}
+                onChange={(event) => void handleTaskTypeChange(event.target.value)}
+                disabled={isFromOtherBranch || isTypeUpdating}
+              >
+                <option value="">No type</option>
+                {!canonicalTypeSelection && taskType.trim() ? (
+                  <option value={taskType}>{taskType} (not configured)</option>
+                ) : null}
+                {typeOptions.map((typeOption) => (
+                  <option key={typeOption} value={typeOption}>
+                    {typeOption}
+                  </option>
+                ))}
+              </select>
+              {typeUpdateError ? (
+                <p id="task-type-update-error" role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
+                  {typeUpdateError}
+                </p>
+              ) : null}
+            </Field>
+
+            {projectOptions.length > 0 && (
+              <Field label="Project">
+                <select
+                  className={`${SIDEBAR_SELECT_CLASS} ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  aria-label="Task project"
+                  value={projectSelectionValue}
+                  onChange={(e) => handleInlineMetaUpdate({ project: e.target.value })}
+                  disabled={isFromOtherBranch}
+                >
+                  <option value="">No Project</option>
+                  {!canonicalProjectSelection && project.trim() ? (
+                    <option value={project}>{project} (not configured)</option>
+                  ) : null}
+                  {projectOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+
+            <Field label="Milestone">
+              <select
+                aria-label="Milestone"
+                className={`${SIDEBAR_SELECT_CLASS} ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
+                value={milestoneSelectionValue}
 				onChange={(e) => {
 					const value = e.target.value;
 					setMilestone(value);
 					handleInlineMetaUpdate({ milestone: value.trim().length > 0 ? value : null });
 				}}
-              disabled={isFromOtherBranch}
-            >
-              <option value="">No milestone</option>
-              {!hasMilestoneSelection && milestoneSelectionValue ? (
-                <option value={milestoneSelectionValue}>{resolveMilestoneLabel(milestoneSelectionValue)}</option>
-              ) : null}
-              {(milestoneEntities ?? []).map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.title}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Dependencies */}
-          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-            <SectionHeader title="Dependencies" />
-            <DependencyInput
-              value={dependencies}
-              onChange={(value) => handleInlineMetaUpdate({ dependencies: value })}
-              availableTasks={availableTasks}
-              suggestableTasks={localAvailableTasks}
-              currentTaskId={task?.id}
-              label=""
-              disabled={isFromOtherBranch}
-            />
-            {shownReadiness && (
-              <div
-                className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium ${
-                  shownReadiness.isReady
-                    ? 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300'
-                    : 'bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300'
-                }`}
+                disabled={isFromOtherBranch}
               >
-                <span aria-hidden="true">{shownReadiness.isReady ? '✓' : '⏳'}</span>
-                <span>{shownReadiness.isReady ? 'Ready to start' : formatReadinessBlockers(shownReadiness)}</span>
-              </div>
+                <option value="">No milestone</option>
+                {!hasMilestoneSelection && milestoneSelectionValue ? (
+                  <option value={milestoneSelectionValue}>{resolveMilestoneLabel(milestoneSelectionValue)}</option>
+                ) : null}
+                {(milestoneEntities ?? []).map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.title}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            {!isPreview && (
+              <Field label="Due">
+                <input
+                  type="date"
+                  aria-label="Due date"
+                  value={dueDate}
+                  onChange={(event) => setDueDate(event.target.value)}
+                  className="w-full h-9 px-2.5 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
+                />
+              </Field>
             )}
+
+            <Field label="Dependencies" htmlFor="dependency-input">
+              <DependencyInput
+                value={dependencies}
+                onChange={(value) => handleInlineMetaUpdate({ dependencies: value })}
+                availableTasks={availableTasks}
+                suggestableTasks={localAvailableTasks}
+                currentTaskId={task?.id}
+                label=""
+                disabled={isFromOtherBranch}
+              />
+              {shownReadiness && (
+                <div
+                  className={`mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium ${
+                    shownReadiness.isReady
+                      ? 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300'
+                      : 'bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300'
+                  }`}
+                >
+                  <span aria-hidden="true">{shownReadiness.isReady ? '✓' : '⏳'}</span>
+                  <span>{shownReadiness.isReady ? 'Ready to start' : formatReadinessBlockers(shownReadiness)}</span>
+                </div>
+              )}
+            </Field>
+
+            {/* References */}
+            <Field label="References">
+              <div className="space-y-2">
+                {references.length > 0 && (
+                  <ul className="space-y-1.5">
+                    {references.map((ref, idx) => (
+                      <li key={idx} className="flex items-center gap-2 group">
+                        <span className="flex-1 min-w-0">
+                          {ref.startsWith("http://") || ref.startsWith("https://") ? (
+                            <a
+                              href={ref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-sm text-blue-600 dark:text-blue-400 hover:underline break-all"
+                            >
+                              {ref}
+                            </a>
+                          ) : (
+                            <code className="text-xs font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded break-all">
+                              {ref}
+                            </code>
+                          )}
+                        </span>
+                        {!isFromOtherBranch && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newRefs = references.filter((_, i) => i !== idx);
+                              handleInlineMetaUpdate({ references: newRefs });
+                            }}
+                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0"
+                            title="Remove reference"
+                            aria-label={`Remove reference ${ref}`}
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {isPreview && !isFromOtherBranch && (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const input = e.currentTarget.elements.namedItem("newRef") as HTMLInputElement;
+                      const value = input.value.trim();
+                      if (value && !references.includes(value)) {
+                        handleInlineMetaUpdate({ references: [...references, value] });
+                        input.value = "";
+                      }
+                    }}
+                  >
+                    <input
+                      name="newRef"
+                      type="text"
+                      aria-label="Add a reference"
+                      placeholder="Add URL or path, then Enter"
+                      className="w-full h-9 text-sm px-2.5 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
+                    />
+                  </form>
+                )}
+              </div>
+            </Field>
+
+            {/* Modified files */}
+            <Field label={`Modified files${modifiedFiles.length ? ` (${modifiedFiles.length})` : ""}`}>
+              <div className="space-y-2">
+                {modifiedFiles.length > 0 ? (
+                  // A finished task can list hundreds of paths, so the list scrolls inside the
+                  // section instead of pushing the sections below it out of reach.
+                  <ul className="space-y-1.5 max-h-64 overflow-y-auto overscroll-contain pr-1">
+                    {modifiedFiles.map((file, idx) => (
+                      <li key={idx} className="flex items-start gap-2 group">
+                        <span className="flex-1 min-w-0">
+                          <code className="text-xs font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded break-all">
+                            {file}
+                          </code>
+                        </span>
+                        {!isFromOtherBranch && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newFiles = modifiedFiles.filter((_, i) => i !== idx);
+                              handleInlineMetaUpdate({ modifiedFiles: newFiles });
+                            }}
+                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0 mt-0.5"
+                            title="Remove modified file"
+                            aria-label={`Remove modified file ${file}`}
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">No modified files</p>
+                )}
+                {isPreview && !isFromOtherBranch && (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const input = e.currentTarget.elements.namedItem("newModifiedFile") as HTMLInputElement;
+                      const value = input.value.trim();
+                      if (value && !modifiedFiles.includes(value)) {
+                        handleInlineMetaUpdate({ modifiedFiles: [...modifiedFiles, value] });
+                        input.value = "";
+                      }
+                    }}
+                  >
+                    <input
+                      name="newModifiedFile"
+                      type="text"
+                      aria-label="Add a modified file"
+                      placeholder="Add path, then Enter"
+                      className="w-full h-9 text-sm px-2.5 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
+                    />
+                  </form>
+                )}
+              </div>
+            </Field>
           </div>
 
-          {/* Archive button at bottom of sidebar */}
-		          {task && onArchive && !isFromOtherBranch && (
-		            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
-		              <button
-		                onClick={handleArchive}
-		                disabled={demoting}
-		                className="w-full inline-flex items-center justify-center px-4 py-2 bg-red-500 dark:bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-600 dark:hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 focus:ring-red-400 dark:focus:ring-red-500 transition-colors duration-200"
-		              >
-		                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-		                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-                </svg>
-                Archive Task
-              </button>
+          {/* Dates */}
+	          {task && (
+	            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+	              <div><span className="font-semibold text-gray-800 dark:text-gray-100">Created:</span> <StoredDate value={task.createdDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
+	              {task.updatedDate && (
+	                <div><span className="font-semibold text-gray-800 dark:text-gray-100">Updated:</span> <StoredDate value={task.updatedDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
+	              )}
+	              {task.dueDate && isPreview && (
+	                <div><span className="font-semibold text-gray-800 dark:text-gray-100">Due:</span> <StoredDate value={task.dueDate} dateFormat={dateFormat} className="text-gray-700 dark:text-gray-200" /></div>
+	              )}
+	            </div>
+	          )}
+
+          {/* Rare and destructive actions stay out of the header */}
+          {task && ((canDemote && isPreview) || (onArchive && !isFromOtherBranch)) && (
+            <div className="flex flex-col gap-2">
+              {canDemote && isPreview && (
+                <button
+                  type="button"
+                  onClick={() => void handleDemote()}
+                  disabled={demoting}
+                  className="w-full inline-flex items-center justify-center px-3 py-2 rounded-md border border-amber-300 bg-white text-sm font-medium text-amber-800 hover:bg-amber-50 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-amber-700 dark:bg-gray-800 dark:text-amber-300 dark:hover:bg-amber-950/40 transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Move task to drafts"
+                >
+                  {demoting ? "Demoting…" : "Demote to draft"}
+                </button>
+              )}
+              {onArchive && !isFromOtherBranch && (
+                <button
+                  type="button"
+                  onClick={handleArchive}
+                  disabled={demoting}
+                  className="w-full inline-flex items-center justify-center px-3 py-2 rounded-md border border-red-300 bg-white text-sm font-medium text-red-700 hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500 dark:border-red-800 dark:bg-gray-800 dark:text-red-300 dark:hover:bg-red-950/40 transition-colors duration-200"
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+                  </svg>
+                  Archive Task
+                </button>
+              )}
             </div>
           )}
-        </div>
+        </aside>
 	      </div>
 		</fieldset>
     </Modal>
   );
 };
 
-const StatusSelect: React.FC<{ current: string; onChange: (v: string) => void; disabled?: boolean }> = ({ current, onChange, disabled }) => {
-  const [statuses, setStatuses] = useState<string[]>([]);
+const StatusSelect: React.FC<{
+  current: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  statuses?: string[];
+  className?: string;
+}> = ({ current, onChange, disabled, statuses: providedStatuses, className }) => {
+  const [fetchedStatuses, setFetchedStatuses] = useState<string[]>([]);
+  const hasProvidedStatuses = Boolean(providedStatuses && providedStatuses.length > 0);
   useEffect(() => {
-    apiClient.fetchStatuses().then(setStatuses).catch(() => setStatuses(["To Do", "In Progress", "Done"]));
-  }, []);
+    if (hasProvidedStatuses) return;
+    apiClient.fetchStatuses().then(setFetchedStatuses).catch(() => setFetchedStatuses(["To Do", "In Progress", "Done"]));
+  }, [hasProvidedStatuses]);
+  const statuses = hasProvidedStatuses ? (providedStatuses ?? []) : fetchedStatuses;
   // A draft is on status Draft, and a completed record can hold a historical status, neither of
   // which is configured. Showing the value the record actually has beats showing the first option.
   const options = !current || statuses.includes(current) ? statuses : [current, ...statuses];
   return (
     <select
-      className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
+      aria-label="Status"
+      className={`${className ?? SIDEBAR_SELECT_CLASS} focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
       value={current}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}

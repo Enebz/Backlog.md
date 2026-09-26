@@ -183,6 +183,28 @@ export function formatStoredDateForCompactDisplay(
 	return { text: formatUtcDateForDisplay(localDate, { dateFormat: options.dateFormat }), title };
 }
 
+/**
+ * Age variant for a conversation: minutes and hours within the last day, then the local date and
+ * time. The hover carries the local time and the canonical UTC value.
+ */
+export function formatStoredDateAsAge(
+	dateStr: string | undefined,
+	options: StoredDateDisplayOptions = {},
+	now: Date = new Date(),
+): StoredDateDisplay {
+	const full = formatStoredDateForDisplay(dateStr, options);
+	const canonicalUtc = formatUtcDateForDisplay(dateStr);
+	const parsed = canonicalUtc && DATE_TIME_REGEX.test(canonicalUtc) ? parseStoredUtcDate(canonicalUtc) : null;
+	if (!parsed) return full;
+
+	const title = full.title ? `${full.text} · ${full.title}` : full.text;
+	const minutes = Math.floor((now.getTime() - parsed.getTime()) / 60_000);
+	if (minutes < 0 || minutes >= 24 * 60) return { text: full.text, title };
+	if (minutes < 1) return { text: "just now", title };
+	if (minutes < 60) return { text: `${minutes} min ago`, title };
+	return { text: `${Math.floor(minutes / 60)}h ago`, title };
+}
+
 /** Whole calendar days from `earlier` to `later`, both `yyyy-mm-dd` read in the same timezone. */
 function calendarDaysBetween(earlier: string, later: string): number | null {
 	const from = parseStoredUtcDate(earlier);
