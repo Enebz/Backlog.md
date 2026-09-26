@@ -4,6 +4,8 @@ import { compareTaskIds, sortByPriority } from '../../utils/task-sorting';
 import type { ReorderTaskPayload } from '../lib/api';
 import { parseStoredUtcDate } from '../utils/date-display';
 import TaskCard from './TaskCard';
+import { useWebUserName } from '../contexts/WebUserContext';
+import { type DecisionKind, hasUserReplied } from '../utils/workflow';
 
 interface TaskColumnProps {
   title: string;
@@ -29,6 +31,8 @@ interface TaskColumnProps {
   onBatchMove?: (targetStatus: string, targetMilestone?: string | null) => void;
   isSelectionDragging?: boolean;
   onSelectionDragChange?: (active: boolean) => void;
+  /** Proposals or questions for the person at the board: the column stands out and offers a review. */
+  decisionKind?: DecisionKind | null;
 }
 
 type CreatedDateSortDirection = 'asc' | 'desc';
@@ -83,7 +87,9 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
   onBatchMove,
   isSelectionDragging,
   onSelectionDragChange,
+  decisionKind = null,
 }) => {
+  const webUserName = useWebUserName();
   const [isDragOver, setIsDragOver] = React.useState(false);
   const [draggedTaskId, setDraggedTaskId] = React.useState<string | null>(null);
   const [dropPosition, setDropPosition] = React.useState<{ index: number; position: 'before' | 'after' | 'self' } | null>(null);
@@ -233,6 +239,11 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
   };
 
   const isEmpty = tasks.length === 0;
+  const isQuestionColumn = decisionKind === 'question';
+  // The cards still needing the person's decision: their own comment is not the latest one.
+  const undecidedCount = decisionKind
+    ? tasks.filter((task) => !task.branch && !hasUserReplied(task, webUserName)).length
+    : 0;
 
   return (
     <div
@@ -241,22 +252,29 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
       } ${
         isDragOver && (dragSourceStatus !== title || (dragSourceLane ?? null) !== (laneId ?? null))
           ? 'bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-600 border-dashed'
-          : isEmpty
-            ? 'bg-gray-50/50 dark:bg-gray-800/30 border border-gray-200/50 dark:border-gray-700/50'
-            : 'bg-white border border-gray-200 shadow-sm dark:bg-gray-800 dark:border-gray-700'
+          : isQuestionColumn
+            ? 'bg-amber-50/70 border border-amber-300 shadow-sm dark:bg-amber-950/20 dark:border-amber-700/70'
+            : isEmpty
+              ? 'bg-gray-50/50 dark:bg-gray-800/30 border border-gray-200/50 dark:border-gray-700/50'
+              : 'bg-white border border-gray-200 shadow-sm dark:bg-gray-800 dark:border-gray-700'
       }`}
+      data-decision-column={decisionKind ?? undefined}
       onDrop={handleDrop}
       onDragOver={handleDragOverColumn}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
     >
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <h3 className="font-semibold text-gray-900 dark:text-gray-100 transition-colors duration-200">{title}</h3>
-          <span className={`px-2 py-1 text-xs font-medium rounded-circle ${getStatusBadgeClass(title)}`}>
+      <div className="flex items-center justify-between gap-2 mb-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className={`truncate font-semibold transition-colors duration-200 ${isQuestionColumn ? 'text-amber-900 dark:text-amber-200' : 'text-gray-900 dark:text-gray-100'}`}>{title}</h3>
+          <span
+            className={`shrink-0 px-2 py-1 text-xs font-medium rounded-circle ${isQuestionColumn ? 'bg-amber-200 text-amber-900 dark:bg-amber-800 dark:text-amber-100' : getStatusBadgeClass(title)}`}
+            title={decisionKind ? `${undecidedCount} of ${tasks.length} still need your ${isQuestionColumn ? 'answer' : 'decision'}` : undefined}
+          >
             {tasks.length}
           </span>
         </div>
+        <div className="flex shrink-0 items-center gap-1">
         
         {canReorderColumn && (
           <div className="relative" ref={menuRef}>
@@ -318,6 +336,7 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
             )}
           </div>
         )}
+        </div>
       </div>
       
       <div className="space-y-3">
@@ -425,7 +444,9 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
           <div className="text-center py-2 text-gray-400 dark:text-gray-500 text-xs transition-colors duration-200">
             {dragSourceStatus && dragSourceStatus !== title
               ? `Drop to move`
-              : `Empty`}
+              : isQuestionColumn
+                ? 'Nothing waiting'
+                : 'Empty'}
           </div>
         )}
 

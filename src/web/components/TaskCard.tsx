@@ -5,6 +5,10 @@ import AcceptanceCriteriaProgress, { getAcceptanceCriteriaProgressCounts } from 
 import StoredDate from './StoredDate';
 import ProjectBadge from './ProjectBadge';
 import TaskTypeBadge from './TaskTypeBadge';
+import PersonAvatar from './PersonAvatar';
+import { useWebUserName } from '../contexts/WebUserContext';
+import { askedBy, displayPerson, hasUserReplied, topicLabels } from '../utils/workflow';
+import { isSamePerson } from '../../utils/web-user';
 
 interface TaskCardProps {
   task: Task;
@@ -77,6 +81,12 @@ const TaskCard: React.FC<TaskCardProps> = ({
 }) => {
   const [isDragging, setIsDragging] = React.useState(false);
   const [showBranchTooltip, setShowBranchTooltip] = React.useState(false);
+  const webUserName = useWebUserName();
+  const requesters = askedBy(task.labels);
+  const labels = topicLabels(task.labels);
+  const commentCount = task.comments?.length ?? 0;
+  const userReplied = hasUserReplied(task, webUserName);
+  const assigneeIsRequester = Boolean(requesters[0]) && task.assignee.length === 1 && isSamePerson(task.assignee[0], requesters[0]);
 
   // Check if task is from another branch (read-only)
   const isFromOtherBranch = Boolean(task.branch);
@@ -271,10 +281,10 @@ const TaskCard: React.FC<TaskCardProps> = ({
           {task.title}
         </h4>
 
-        {/* Labels - limit to 3 */}
-        {task.labels.length > 0 && (
+        {/* Topic labels - limit to 3; from: labels are shown as who asked */}
+        {labels.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-2">
-            {task.labels.slice(0, 3).map(label => (
+            {labels.slice(0, 3).map(label => (
               <span
                 key={label}
                 className="inline-block px-1.5 py-0.5 text-[10px] bg-gray-100 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded transition-colors duration-200"
@@ -282,23 +292,51 @@ const TaskCard: React.FC<TaskCardProps> = ({
                 {label}
               </span>
             ))}
-            {task.labels.length > 3 && (
+            {labels.length > 3 && (
               <span className="inline-block px-1.5 py-0.5 text-[10px] text-gray-400 dark:text-gray-500">
-                +{task.labels.length - 3}
+                +{labels.length - 3}
               </span>
             )}
           </div>
         )}
 
-        {/* Footer with date */}
-        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[10px] text-gray-400 dark:text-gray-500 mt-2 pt-1.5 border-t border-gray-100 dark:border-gray-600/50 transition-colors duration-200">
-          <span>{formatRelativeDate(task.createdDate)}</span>
-          {task.dueDate && <span>Due: <StoredDate value={task.dueDate} dateFormat={dateFormat} /></span>}
-          {task.assignee.length > 0 && (
-            <span className="truncate max-w-[80px]" title={task.assignee.join(', ')}>
-              {task.assignee[0]}
-            </span>
-          )}
+        {/* Footer: who asked and when, then the conversation and who has it */}
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400 mt-2 pt-2 border-t border-gray-100 dark:border-gray-600/50 transition-colors duration-200">
+          <span className="flex min-w-0 items-center gap-1.5">
+            {requesters[0] && (
+              <span className="flex min-w-0 items-center gap-1" title={`Asked by ${requesters.join(', ')}`} data-asked-by={requesters[0]}>
+                <PersonAvatar name={requesters[0]} webUserName={webUserName} size="xs" />
+                <span className="truncate font-medium text-gray-600 dark:text-gray-300">{displayPerson(requesters[0], webUserName)}</span>
+              </span>
+            )}
+            <span className="shrink-0 text-gray-400 dark:text-gray-500">{formatRelativeDate(task.createdDate)}</span>
+          </span>
+          <span className="flex shrink-0 items-center gap-2">
+            {task.dueDate && <span>Due: <StoredDate value={task.dueDate} dateFormat={dateFormat} /></span>}
+            {userReplied && (
+              <span
+                className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:bg-blue-900/50 dark:text-blue-200"
+                title="Your comment is the latest"
+              >
+                You replied
+              </span>
+            )}
+            {commentCount > 0 && (
+              <span className="inline-flex items-center gap-0.5" title={`${commentCount} comment${commentCount === 1 ? '' : 's'}`}>
+                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+                <span className="sr-only">Comments: </span>
+                {commentCount}
+              </span>
+            )}
+            {task.assignee.length > 0 && !assigneeIsRequester && (
+              <span className="flex min-w-0 items-center gap-1" title={task.assignee.join(', ')}>
+                <PersonAvatar name={task.assignee[0]} webUserName={webUserName} size="xs" />
+                <span className="truncate max-w-[80px]">{displayPerson(task.assignee[0] ?? '', webUserName)}</span>
+              </span>
+            )}
+          </span>
         </div>
       </div>
     </div>

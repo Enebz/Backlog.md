@@ -995,6 +995,7 @@ function AppContent() {
                 error={loadError}
                 onRefreshData={refreshData}
                 duplicateRepairPlan={duplicateRepairPlan}
+                statuses={statuses}
               />
             }
           >

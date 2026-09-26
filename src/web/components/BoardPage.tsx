@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import Board from './Board';
+import Board, { type BoardFilters } from './Board';
 import { type Milestone, type Task } from '../../types';
 import { resolvePriorityValue } from '../../utils/priority-config';
 import { resolveProjectValue } from '../../utils/project-config';
@@ -106,8 +106,13 @@ export default function BoardPage({
 		}, { replace: true });
 	};
 
-	const handleFiltersChange = (filters: { assignee: string; labels: string[]; priority: string; taskType: string; project: string }) => {
+	const handleFiltersChange = (filters: BoardFilters) => {
 		setSearchParams(params => {
+			if (filters.askedBy) {
+				params.set('from', filters.askedBy);
+			} else {
+				params.delete('from');
+			}
 			if (filters.assignee) {
 				params.set('assignee', filters.assignee);
 			} else {
@@ -141,6 +146,7 @@ export default function BoardPage({
 	};
 
 	const filterAssignee = searchParams.get('assignee') ?? '';
+	const filterAskedBy = searchParams.get('from') ?? '';
 	const filterLabels = [
 		...searchParams.getAll('label'),
 		...searchParams.getAll('labels').flatMap((value) => value.split(',')),
@@ -216,6 +222,7 @@ export default function BoardPage({
 				availableTypes={availableTypes}
 				filterProject={filterProject}
 				availableProjects={availableProjects}
+				filterAskedBy={filterAskedBy}
 				onFiltersChange={handleFiltersChange}
 				hideEmptyColumns={hideEmptyColumns}
 				dateFormat={dateFormat}

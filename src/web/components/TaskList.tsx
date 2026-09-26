@@ -23,6 +23,9 @@ import StoredDate from "./StoredDate";
 import AcceptanceCriteriaProgress from "./AcceptanceCriteriaProgress";
 import LabelFilterDropdown from "./LabelFilterDropdown";
 import { SuccessToast } from "./SuccessToast";
+import PersonAvatar from "./PersonAvatar";
+import { useWebUserName } from "../contexts/WebUserContext";
+import { askedBy, displayPerson, getWorkflow, topicLabels } from "../utils/workflow";
 
 interface TaskListProps {
 	onEditTask: (task: Task) => void;
@@ -61,20 +64,6 @@ function compareTaskIdsAscending(a: Task, b: Task): number {
 
 function sortTasksByIdDescending(list: Task[]): Task[] {
 	return [...list].sort((a, b) => compareTaskIdsDescending(a.id, b.id));
-}
-
-function getAssigneeInitials(value: string): string {
-	const cleaned = value.replace(/^@/, "").trim();
-	if (!cleaned) return "?";
-	const parts = cleaned
-		.split(/[\s._-]+/)
-		.map((part) => part.trim())
-		.filter(Boolean);
-	if (parts.length === 0) return cleaned.slice(0, 2).toUpperCase();
-	const first = parts[0] ?? "";
-	if (parts.length === 1) return first.slice(0, 2).toUpperCase();
-	const second = parts[1] ?? "";
-	return `${first.charAt(0)}${second.charAt(0)}`.toUpperCase();
 }
 
 function getStatusFilters(searchParams: URLSearchParams): string[] {
@@ -150,6 +139,18 @@ const TaskList: React.FC<TaskListProps> = ({
 		return labels.map((label) => label.trim()).filter((label) => label.length > 0);
 	}, []);
 	const [labelFilter, setLabelFilter] = useState<string[]>(initialLabelParams);
+	const [assigneeFilter, setAssigneeFilter] = useState(() => searchParams.get("assignee") ?? "");
+	const webUserName = useWebUserName();
+	const workflow = useMemo(() => getWorkflow(statusOptions), [statusOptions]);
+	const assigneeOptions = useMemo(() => {
+		const seen = new Set<string>();
+		for (const task of tasks) {
+			for (const assignee of task.assignee) {
+				if (assignee.trim()) seen.add(assignee.trim());
+			}
+		}
+		return Array.from(seen).sort((a, b) => a.localeCompare(b));
+	}, [tasks]);
 	const [displayTasks, setDisplayTasks] = useState<Task[]>(() => sortTasksByIdDescending(tasks));
 	const [error, setError] = useState<string | null>(null);
 	const [showCleanupModal, setShowCleanupModal] = useState(false);
@@ -311,7 +312,8 @@ const TaskList: React.FC<TaskListProps> = ({
 			excludedStatusFilter.length > 0 ||
 			priorityFilter ||
 			labelFilter.length > 0 ||
-			milestoneFilter,
+			milestoneFilter ||
+			assigneeFilter,
 	);
 	const totalTasks = sortedBaseTasks.length;
 
@@ -328,6 +330,7 @@ const TaskList: React.FC<TaskListProps> = ({
 		const rawParamPriority = searchParams.get("priority") ?? "";
 		const paramPriority = resolvePriorityValue(rawParamPriority, availablePriorities) ?? "";
 		const paramMilestone = searchParams.get("milestone") ?? "";
+		const paramAssignee = searchParams.get("assignee") ?? "";
 		const paramLabels = [...searchParams.getAll("label"), ...searchParams.getAll("labels")];
 		const labelsCsv = searchParams.get("labels");
 		if (labelsCsv) {
@@ -359,6 +362,9 @@ const TaskList: React.FC<TaskListProps> = ({
 		}
 		if (paramMilestone !== milestoneFilter) {
 			setMilestoneFilter(paramMilestone);
+		}
+		if (paramAssignee !== assigneeFilter) {
+			setAssigneeFilter(paramAssignee);
 		}
 		if (!areEqualStringArrays(normalizedLabels, labelFilter)) {
 			setLabelFilter(normalizedLabels);
@@ -453,8 +459,12 @@ const TaskList: React.FC<TaskListProps> = ({
 		nextPriority: string,
 		nextLabels: string[],
 		nextMilestone: string,
+		nextAssignee: string = assigneeFilter,
 	) => {
 		const params = new URLSearchParams();
+		if (nextAssignee) {
+			params.set("assignee", nextAssignee);
+		}
 		for (const status of nextStatuses) {
 			if (status.trim()) {
 				params.append("status", status.trim());
@@ -507,13 +517,19 @@ const TaskList: React.FC<TaskListProps> = ({
 		syncUrl(statusFilter, excludedStatusFilter, priorityFilter, labelFilter, value);
 	};
 
+	const handleAssigneeChange = (value: string) => {
+		setAssigneeFilter(value);
+		syncUrl(statusFilter, excludedStatusFilter, priorityFilter, labelFilter, milestoneFilter, value);
+	};
+
 	const handleClearFilters = () => {
+		setAssigneeFilter("");
 		setStatusFilter([]);
 		setExcludedStatusFilter([]);
 		setPriorityFilter("");
 		setLabelFilter([]);
 		setMilestoneFilter("");
-		syncUrl([], [], "", [], "");
+		syncUrl([], [], "", [], "", "");
 		setDisplayTasks(sortedBaseTasks);
 		setError(null);
 	};
@@ -534,6 +550,12 @@ const TaskList: React.FC<TaskListProps> = ({
 	};
 
 	const getStatusColor = (status: string) => {
+		if (workflow.waitingStatus && status.toLowerCase() === workflow.waitingStatus.toLowerCase()) {
+			return "bg-amber-100 text-amber-900 dark:bg-amber-900/50 dark:text-amber-200";
+		}
+		if (workflow.approvedStatus && status.toLowerCase() === workflow.approvedStatus.toLowerCase()) {
+			return "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200";
+		}
 		switch (status.toLowerCase()) {
 			case "to do":
 				return "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200";
@@ -617,7 +639,13 @@ const TaskList: React.FC<TaskListProps> = ({
 		const compareText = (a: string, b: string) => collator.compare(a, b);
 		const withDirection = (value: number) => (sortDirection === "asc" ? value : -value);
 
-		return [...displayTasks].sort((a, b) => {
+		const matchesAssignee = (task: Task) =>
+			!assigneeFilter
+				? true
+				: assigneeFilter === "__unassigned__"
+					? task.assignee.every((assignee) => !assignee.trim())
+					: task.assignee.some((assignee) => assignee.trim() === assigneeFilter);
+		return displayTasks.filter(matchesAssignee).sort((a, b) => {
 			let result = 0;
 			switch (sortColumn) {
 				case "id": {
@@ -677,7 +705,7 @@ const TaskList: React.FC<TaskListProps> = ({
 			if (sortColumn === "ordinal") return compareTaskIdsAscending(a, b);
 			return compareTaskIdsDescending(a.id, b.id);
 		});
-	}, [availablePriorities, displayTasks, milestoneEntities, sortColumn, sortDirection]);
+	}, [assigneeFilter, availablePriorities, displayTasks, milestoneEntities, sortColumn, sortDirection]);
 
 	const currentCount = sortedDisplayTasks.length;
 
@@ -744,6 +772,21 @@ const TaskList: React.FC<TaskListProps> = ({
 							clearLabel="Clear excluded statuses"
 							className="min-w-[210px]"
 						/>
+
+						<select
+							aria-label="Filter tasks by assignee"
+							value={assigneeFilter}
+							onChange={(event) => handleAssigneeChange(event.target.value)}
+							className="min-w-[150px] h-10 py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200"
+						>
+							<option value="">All assignees</option>
+							<option value="__unassigned__">Unassigned</option>
+							{assigneeOptions.map((assignee) => (
+								<option key={assignee} value={assignee}>
+									{displayPerson(assignee, webUserName) === "You" ? `You (${assignee})` : assignee}
+								</option>
+							))}
+						</select>
 
 						<select
 							value={priorityFilter}
@@ -860,8 +903,10 @@ const TaskList: React.FC<TaskListProps> = ({
 							<tbody className="divide-y divide-gray-200 dark:divide-gray-700">
 								{sortedDisplayTasks.map((task) => {
 									const isFromOtherBranch = Boolean(task.branch);
-									const visibleLabels = task.labels.slice(0, 2);
-									const labelOverflow = Math.max(task.labels.length - visibleLabels.length, 0);
+									const requesters = askedBy(task.labels);
+									const topics = topicLabels(task.labels);
+									const visibleLabels = requesters.length > 0 ? [] : topics.slice(0, 2);
+									const labelOverflow = Math.max(topics.length - visibleLabels.length, 0);
 									const visibleAssignees = task.assignee.slice(0, 2);
 									const assigneeOverflow = Math.max(task.assignee.length - visibleAssignees.length, 0);
 									const milestoneLabel = task.milestone ? getMilestoneLabel(task.milestone, milestoneEntities) : "—";
@@ -933,8 +978,18 @@ const TaskList: React.FC<TaskListProps> = ({
 												{task.ordinal !== undefined ? task.ordinal : <span className="text-gray-300 dark:text-gray-600">—</span>}
 											</td>
 											<td className="px-3 py-2.5">
-												{visibleLabels.length > 0 ? (
+												{visibleLabels.length > 0 || requesters.length > 0 ? (
 													<div className="flex items-center gap-1 min-w-0">
+														{requesters[0] && (
+															<span
+																className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-gray-700 dark:text-gray-200"
+																title={`Asked by ${requesters.join(", ")}`}
+																data-asked-by={requesters[0]}
+															>
+																<PersonAvatar name={requesters[0]} webUserName={webUserName} size="xs" />
+																<span className="truncate">{displayPerson(requesters[0], webUserName)}</span>
+															</span>
+														)}
 														{visibleLabels.map((label) => (
 															<span
 																key={label}
@@ -956,12 +1011,8 @@ const TaskList: React.FC<TaskListProps> = ({
 												{visibleAssignees.length > 0 ? (
 													<div className="flex items-center gap-1.5">
 														{visibleAssignees.map((assignee) => (
-															<span
-																key={assignee}
-																title={assignee}
-																className="inline-flex h-6 w-6 items-center justify-center rounded-circle bg-blue-100 text-[10px] font-semibold text-blue-700 dark:bg-blue-900/50 dark:text-blue-200"
-															>
-																{getAssigneeInitials(assignee)}
+															<span key={assignee} title={displayPerson(assignee, webUserName) === "You" ? `You (${assignee})` : assignee}>
+																<PersonAvatar name={assignee} webUserName={webUserName} size="sm" />
 															</span>
 														))}
 														{assigneeOverflow > 0 && (

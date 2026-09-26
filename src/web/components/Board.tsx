@@ -14,6 +14,8 @@ import { BoardLoadingSkeleton } from './BoardLoadingSkeleton';
 import CleanupModal from './CleanupModal';
 import LabelFilterDropdown from './LabelFilterDropdown';
 import { SuccessToast } from './SuccessToast';
+import { useWebUserName } from '../contexts/WebUserContext';
+import { askedBy, decisionKindFor, displayPerson, getWorkflow, hasUserReplied, statusQueue } from '../utils/workflow';
 
 interface BoardProps {
   onEditTask: (task: Task) => void;
@@ -41,9 +43,19 @@ interface BoardProps {
   availableTypes?: string[];
   filterProject?: string;
   availableProjects?: string[];
-  onFiltersChange?: (filters: { assignee: string; labels: string[]; priority: string; taskType: string; project: string }) => void;
+  filterAskedBy?: string;
+  onFiltersChange?: (filters: BoardFilters) => void;
   hideEmptyColumns?: boolean;
   dateFormat?: string;
+}
+
+export interface BoardFilters {
+  assignee: string;
+  labels: string[];
+  priority: string;
+  taskType: string;
+  project: string;
+  askedBy: string;
 }
 
 const BOARD_FILTER_SELECT_CLASS =
@@ -77,6 +89,7 @@ const Board: React.FC<BoardProps> = ({
   availableTypes,
   filterProject = '',
   availableProjects,
+  filterAskedBy = '',
   onFiltersChange,
   hideEmptyColumns = false,
   dateFormat,
@@ -96,7 +109,10 @@ const Board: React.FC<BoardProps> = ({
   const [showCleanupModal, setShowCleanupModal] = useState(false);
   const [cleanupSuccessMessage, setCleanupSuccessMessage] = useState<string | null>(null);
   const [collapsedLanes, setCollapsedLanes] = useState<Record<string, boolean>>({});
+  const [showFiltersOnPhone, setShowFiltersOnPhone] = useState(false);
   const terminalStatus = getTerminalStatus(statuses);
+  const webUserName = useWebUserName();
+  const workflow = useMemo(() => getWorkflow(statuses), [statuses]);
   const priorityOptions = useMemo(
     () => [{ label: 'All priorities', value: '' }, ...getPriorityOptions(availablePriorities)],
     [availablePriorities]
@@ -250,6 +266,24 @@ const Board: React.FC<BoardProps> = ({
     return Array.from(seen).sort((a, b) => a.localeCompare(b));
   }, [tasks]);
 
+  const uniqueRequesters = useMemo(() => {
+    const seen = new Set<string>();
+    for (const task of tasks) {
+      for (const name of askedBy(task.labels)) seen.add(name);
+    }
+    return Array.from(seen).sort((a, b) => a.localeCompare(b));
+  }, [tasks]);
+
+  // The person's two queues, over the whole board: proposals to approve and questions to answer.
+  const decisionQueues = useMemo(() => {
+    const undecided = (status: string | null) =>
+      status ? statusQueue(tasks, status).filter((task) => !hasUserReplied(task, webUserName)) : [];
+    return {
+      questions: undecided(workflow.waitingStatus),
+      proposals: workflow.proposalStatus && workflow.approvedStatus ? undecided(workflow.proposalStatus) : [],
+    };
+  }, [tasks, workflow, webUserName]);
+
   const uniqueLabels = useMemo(
     () => collectAvailableLabels(tasks, availableLabels),
     [tasks, availableLabels]
@@ -261,6 +295,7 @@ const Board: React.FC<BoardProps> = ({
   );
 
   const hasActiveFilters =
+    filterAskedBy !== '' ||
     filterAssignee !== '' ||
     normalizedFilterLabels.length > 0 ||
     filterPriority !== '' ||
@@ -292,8 +327,22 @@ const Board: React.FC<BoardProps> = ({
     if (filterProject) {
       result = result.filter(task => matchesProjectFilter(task.project, filterProject));
     }
+    if (filterAskedBy) {
+      const wanted = filterAskedBy.toLowerCase();
+      result = result.filter(task => askedBy(task.labels).some(name => name.toLowerCase() === wanted));
+    }
     return result;
-  }, [tasks, milestoneFilter, canonicalMilestoneFilter, milestoneAliasToCanonical, filterAssignee, normalizedFilterLabels, filterPriority, filterType, filterProject]);
+  }, [tasks, milestoneFilter, canonicalMilestoneFilter, milestoneAliasToCanonical, filterAssignee, normalizedFilterLabels, filterPriority, filterType, filterProject, filterAskedBy]);
+
+  const currentFilters: BoardFilters = {
+    assignee: filterAssignee,
+    labels: normalizedFilterLabels,
+    priority: filterPriority,
+    taskType: filterType,
+    project: filterProject,
+    askedBy: filterAskedBy,
+  };
+  const changeFilters = (changes: Partial<BoardFilters>) => onFiltersChange?.({ ...currentFilters, ...changes });
 
   // Handle highlighting a task (opening its edit popup)
   useEffect(() => {
@@ -672,6 +721,38 @@ const Board: React.FC<BoardProps> = ({
             + New Task
           </button>
         </div>
+        {(decisionQueues.questions.length > 0 || decisionQueues.proposals.length > 0) && (
+          <div className="flex flex-wrap gap-3" role="region" aria-label="Decisions waiting">
+            {decisionQueues.questions[0] && workflow.waitingStatus && (
+              <button
+                type="button"
+                onClick={() => onEditTask(decisionQueues.questions[0] as Task)}
+                className="group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-left transition-colors duration-150 hover:border-amber-400 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-amber-700 dark:bg-amber-950/30 dark:hover:bg-amber-950/50 sm:flex-none"
+              >
+                <span className="text-2xl font-bold tabular-nums text-amber-700 dark:text-amber-300">{decisionQueues.questions.length}</span>
+                <span className="min-w-0 flex-1 text-sm text-amber-900 dark:text-amber-100">
+                  <span className="block font-semibold">{workflow.waitingStatus}</span>
+                  <span className="block text-xs text-amber-800/80 dark:text-amber-200/80">unanswered questions</span>
+                </span>
+                <span className="rounded-md bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-amber-600 dark:bg-amber-600">Answer</span>
+              </button>
+            )}
+            {decisionQueues.proposals[0] && workflow.proposalStatus && (
+              <button
+                type="button"
+                onClick={() => onEditTask(decisionQueues.proposals[0] as Task)}
+                className="group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-left transition-colors duration-150 hover:border-blue-300 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-blue-800 dark:bg-blue-950/30 dark:hover:bg-blue-950/50 sm:flex-none"
+              >
+                <span className="text-2xl font-bold tabular-nums text-blue-700 dark:text-blue-300">{decisionQueues.proposals.length}</span>
+                <span className="min-w-0 flex-1 text-sm text-blue-900 dark:text-blue-100">
+                  <span className="block font-semibold">{workflow.proposalStatus}</span>
+                  <span className="block text-xs text-blue-800/80 dark:text-blue-200/80">proposals to approve or decline</span>
+                </span>
+                <span className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-blue-700">Review</span>
+              </button>
+            )}
+          </div>
+        )}
         {selectedTaskIds.length > 0 && (
           <div
             className="flex flex-wrap items-center gap-3 rounded-lg border border-blue-300 dark:border-blue-600 bg-blue-50 dark:bg-blue-900/30 px-4 py-2 transition-colors duration-200"
@@ -740,24 +821,48 @@ const Board: React.FC<BoardProps> = ({
               </button>
             </div>
             {onFiltersChange && (
-              <div className="flex flex-wrap items-center gap-3" aria-label="Board filters">
+              <button
+                type="button"
+                onClick={() => setShowFiltersOnPhone((shown) => !shown)}
+                aria-expanded={showFiltersOnPhone}
+                className={`${BOARD_FILTER_BUTTON_CLASS} sm:hidden`}
+              >
+                {showFiltersOnPhone ? 'Hide filters' : hasActiveFilters ? 'Filters (on)' : 'Filters'}
+              </button>
+            )}
+            {onFiltersChange && (
+              <div className={`${showFiltersOnPhone ? 'flex' : 'hidden'} sm:flex flex-wrap items-center gap-3`} aria-label="Board filters">
                 <select
                   aria-label="Filter board by assignee"
                   value={filterAssignee}
-                  onChange={e => onFiltersChange({ assignee: e.target.value, labels: normalizedFilterLabels, priority: filterPriority, taskType: filterType, project: filterProject })}
+                  onChange={e => changeFilters({ assignee: e.target.value })}
                   className={BOARD_FILTER_SELECT_CLASS}
                 >
                   <option value="">All assignees</option>
                   <option value="__unassigned__">Unassigned</option>
                   {uniqueAssignees.map(a => (
-                    <option key={a} value={a}>{a}</option>
+                    <option key={a} value={a}>{displayPerson(a, webUserName) === 'You' ? `You (${a})` : a}</option>
                   ))}
                 </select>
+
+                {uniqueRequesters.length > 0 && (
+                  <select
+                    aria-label="Filter board by who asked"
+                    value={filterAskedBy}
+                    onChange={e => changeFilters({ askedBy: e.target.value })}
+                    className={BOARD_FILTER_SELECT_CLASS}
+                  >
+                    <option value="">Asked by anyone</option>
+                    {uniqueRequesters.map(name => (
+                      <option key={name} value={name}>Asked by {name}</option>
+                    ))}
+                  </select>
+                )}
 
                 <LabelFilterDropdown
                   availableLabels={uniqueLabels}
                   selectedLabels={normalizedFilterLabels}
-                  onChange={labels => onFiltersChange({ assignee: filterAssignee, labels, priority: filterPriority, taskType: filterType, project: filterProject })}
+                  onChange={labels => changeFilters({ labels })}
                   menuId="board-labels-filter-menu"
                   className="min-w-[200px]"
                 />
@@ -765,7 +870,7 @@ const Board: React.FC<BoardProps> = ({
                 <select
                   aria-label="Filter board by type"
                   value={filterType}
-                  onChange={e => onFiltersChange({ assignee: filterAssignee, labels: normalizedFilterLabels, priority: filterPriority, taskType: e.target.value, project: filterProject })}
+                  onChange={e => changeFilters({ taskType: e.target.value })}
                   className={BOARD_FILTER_SELECT_CLASS}
                 >
                   <option value="">All types</option>
@@ -778,7 +883,7 @@ const Board: React.FC<BoardProps> = ({
                   <select
                     aria-label="Filter board by project"
                     value={filterProject}
-                    onChange={e => onFiltersChange({ assignee: filterAssignee, labels: normalizedFilterLabels, priority: filterPriority, taskType: filterType, project: e.target.value })}
+                    onChange={e => changeFilters({ project: e.target.value })}
                     className={BOARD_FILTER_SELECT_CLASS}
                   >
                     <option value="">All projects</option>
@@ -791,7 +896,7 @@ const Board: React.FC<BoardProps> = ({
                 <select
                   aria-label="Filter board by priority"
                   value={filterPriority}
-                  onChange={e => onFiltersChange({ assignee: filterAssignee, labels: normalizedFilterLabels, priority: e.target.value, taskType: filterType, project: filterProject })}
+                  onChange={e => changeFilters({ priority: e.target.value })}
                   className={BOARD_FILTER_SELECT_CLASS}
                 >
                   {priorityOptions.map(opt => (
@@ -802,7 +907,7 @@ const Board: React.FC<BoardProps> = ({
                 {hasActiveFilters && (
                   <button
                     type="button"
-                    onClick={() => onFiltersChange({ assignee: '', labels: [], priority: '', taskType: '', project: '' })}
+                    onClick={() => onFiltersChange({ assignee: '', labels: [], priority: '', taskType: '', project: '', askedBy: '' })}
                     className={BOARD_FILTER_BUTTON_CLASS}
                   >
                     Clear filters
@@ -900,6 +1005,7 @@ const Board: React.FC<BoardProps> = ({
                             onDragStart={handleColumnDragStart}
                             onDragEnd={handleColumnDragEnd}
                             onCleanup={status === terminalStatus ? () => setShowCleanupModal(true) : undefined}
+                            decisionKind={decisionKindFor(status, workflow)}
                             {...selectionProps}
                           />
                         </div>
@@ -912,10 +1018,10 @@ const Board: React.FC<BoardProps> = ({
           })}
         </div>
       ) : (
-        <div className="overflow-x-auto pb-2">
+        <div className="overflow-x-auto pb-2 snap-x snap-mandatory sm:snap-none">
           <div className="flex flex-row flex-nowrap gap-4 w-full">
             {visibleStatuses.map((status) => (
-              <div key={status} className="flex-1 min-w-[16rem]">
+              <div key={status} className="flex-1 min-w-[85%] snap-start sm:min-w-[15rem]">
                 <TaskColumn
                   title={status}
                   tasks={getTasksForLane(DEFAULT_LANE_KEY, status)}
@@ -932,6 +1038,7 @@ const Board: React.FC<BoardProps> = ({
                   onDragStart={handleColumnDragStart}
                   onDragEnd={handleColumnDragEnd}
                   onCleanup={status === terminalStatus ? () => setShowCleanupModal(true) : undefined}
+                  decisionKind={decisionKindFor(status, workflow)}
                   {...selectionProps}
                 />
               </div>

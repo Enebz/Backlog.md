@@ -261,6 +261,11 @@ interface SideNavigationProps {
 	error?: Error | null;
 	onRetry?: () => void;
 	onRefreshData: () => Promise<void>;
+	/** The status holding questions for the person at the board, and how many are unanswered. */
+	waitingStatus?: string | null;
+	waitingCount?: number;
+	/** Rendered as a drawer over the page on narrow screens: always expanded, no collapse toggle. */
+	inDrawer?: boolean;
 }
 
 const SideNavigation = memo(function SideNavigation({ 
@@ -269,12 +274,16 @@ const SideNavigation = memo(function SideNavigation({
 	decisions, 
 	isLoading,
 	error,
-	onRetry
+	onRetry,
+	waitingStatus = null,
+	waitingCount = 0,
+	inDrawer = false,
 }: SideNavigationProps) {
-	const [isCollapsed, setIsCollapsed] = useState(() => {
+	const [storedCollapsed, setIsCollapsed] = useState(() => {
 		const saved = localStorage.getItem('sideNavCollapsed');
 		return saved ? JSON.parse(saved) : false;
 	});
+	const isCollapsed = inDrawer ? false : storedCollapsed;
 	const [searchQuery, setSearchQuery] = useState('');
 	const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
 	const [isSearching, setIsSearching] = useState(false);
@@ -319,8 +328,8 @@ const SideNavigation = memo(function SideNavigation({
 	}, [navigate]);
 
 	useEffect(() => {
-		localStorage.setItem('sideNavCollapsed', JSON.stringify(isCollapsed));
-	}, [isCollapsed]);
+		localStorage.setItem('sideNavCollapsed', JSON.stringify(storedCollapsed));
+	}, [storedCollapsed]);
 
 	// Fetch version on mount
 	useEffect(() => {
@@ -466,10 +475,11 @@ const SideNavigation = memo(function SideNavigation({
 
 	return (
 		<ErrorBoundary>
-			<div className={`relative bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 flex flex-col min-h-full z-10 ${isCollapsed ? 'w-16' : 'w-80 min-w-80'}`}>
+			<div className={`relative bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 flex flex-col min-h-full z-10 ${inDrawer ? 'h-full w-80 max-w-[85vw] shadow-2xl' : isCollapsed ? 'w-16' : 'w-80 min-w-80'}`}>
 			{/* Search Bar */}
 			<div className={`${isCollapsed ? 'px-2' : 'px-4'} border-b border-gray-200 dark:border-gray-700 h-18 flex items-center relative`}>
 				{/* Collapse Toggle Button - Always positioned on the border */}
+				{!inDrawer && (
 				<button
 					onClick={toggleCollapse}
 					className="absolute -right-3 top-1/2 transform -translate-y-1/2 z-10 flex items-center justify-center w-6 h-6 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-circle shadow-sm hover:shadow-md text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-all duration-200"
@@ -478,6 +488,7 @@ const SideNavigation = memo(function SideNavigation({
 				>
 					{isCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronLeft />}
 				</button>
+				)}
 				
 				{!isCollapsed ? (
 					<div className="flex items-center w-full">
@@ -660,6 +671,33 @@ const SideNavigation = memo(function SideNavigation({
 							<Icons.Board />
 							<span className="ml-3 text-sm font-medium">Kanban Board</span>
 						</NavLink>
+
+						{/* Questions waiting on the person at the board, as a filtered list */}
+						{waitingStatus && (
+							<NavLink
+								to={`/tasks?status=${encodeURIComponent(waitingStatus)}`}
+								className={() => {
+									const isActive =
+										location.pathname.startsWith('/tasks') &&
+										new URLSearchParams(location.search).getAll('status').join(',') === waitingStatus;
+									return `flex items-center px-3 py-2 rounded-lg transition-colors duration-200 ${
+										isActive
+											? 'bg-amber-100 dark:bg-amber-900/30 text-amber-900 dark:text-amber-200 font-medium'
+											: 'text-gray-600 dark:text-gray-300 hover:bg-amber-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+									}`;
+								}}
+							>
+								<svg className="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+								</svg>
+								<span className="ml-3 flex-1 truncate text-sm font-medium">{waitingStatus}</span>
+								{waitingCount > 0 && (
+									<span className="ml-2 rounded-circle bg-amber-500 px-2 py-0.5 text-xs font-semibold tabular-nums text-white" aria-label={`${waitingCount} unanswered`}>
+										{waitingCount}
+									</span>
+								)}
+							</NavLink>
+						)}
 
 						{/* Tasks Navigation */}
 						<NavLink
@@ -875,6 +913,24 @@ const SideNavigation = memo(function SideNavigation({
 								<Icons.Board />
 							</div>
 						</NavLink>
+						{waitingStatus && (
+							<NavLink
+								to={`/tasks?status=${encodeURIComponent(waitingStatus)}`}
+								data-tooltip-id="sidebar-tooltip"
+								data-tooltip-content={`${waitingStatus} (${waitingCount})`}
+								aria-label={`${waitingStatus}: ${waitingCount} unanswered`}
+								className="relative flex items-center justify-center p-3 rounded-md text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-gray-800 transition-colors duration-200"
+							>
+								<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+								</svg>
+								{waitingCount > 0 && (
+									<span className="absolute right-1 top-1 min-w-[1.1rem] rounded-circle bg-amber-500 px-1 text-center text-[10px] font-semibold leading-4 text-white" aria-hidden="true">
+										{waitingCount}
+									</span>
+								)}
+							</NavLink>
+						)}
 						<NavLink
 							to="/tasks"
 							data-tooltip-id="sidebar-tooltip"
