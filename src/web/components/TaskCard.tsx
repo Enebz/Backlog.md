@@ -348,8 +348,8 @@ const TaskCard: React.FC<TaskCardProps> = ({
             )}
             <span className="shrink-0 text-gray-400 dark:text-gray-500">{formatRelativeDate(task.createdDate)}</span>
           </span>
-          <span className="flex shrink-0 items-center gap-2">
-            {task.dueDate && <span>Due: <StoredDate value={task.dueDate} dateFormat={dateFormat} /></span>}
+          <span className="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
+            {task.dueDate && <span className="whitespace-nowrap">Due: <StoredDate value={task.dueDate} dateFormat={dateFormat} /></span>}
             {userReplied && (
               <span
                 className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:bg-blue-900/50 dark:text-blue-200"
