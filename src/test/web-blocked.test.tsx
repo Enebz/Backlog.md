@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import type { Task } from "../types/index.ts";
 import BoardPage from "../web/components/BoardPage.tsx";
+import TaskList from "../web/components/TaskList.tsx";
 import { WebUserProvider } from "../web/contexts/WebUserContext";
 
 const STATUSES = ["To Do", "Approved", "In Progress", "Waiting on you", "Done"];
@@ -203,5 +204,40 @@ describe("blocked cards on the board", () => {
 		const clear = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Clear filters");
 		await click(clear);
 		expect(cardTitles(container)).toHaveLength(tasks.length);
+	});
+});
+
+describe("blocked rows in the task list", () => {
+	it("carries the same pill, with the reason on hover", () => {
+		const container = setupDom();
+		activeRoot = createRoot(container);
+		act(() => {
+			activeRoot?.render(
+				<MemoryRouter>
+					<TaskList
+						tasks={tasks}
+						availableStatuses={STATUSES}
+						availableLabels={[]}
+						availableMilestones={[]}
+						milestoneEntities={[]}
+						archivedMilestones={[]}
+						onEditTask={() => {}}
+						onNewTask={() => {}}
+					/>
+				</MemoryRouter>,
+			);
+		});
+		const row = (id: string) =>
+			Array.from(container.querySelectorAll("tbody tr")).find((element) => element.textContent?.includes(id));
+		expect(row("TASK-61")?.querySelector("[data-blocked-pill]")?.getAttribute("title")).toBe(
+			"Blocked: an art allowance on the Desk (sugar-bounce)",
+		);
+		expect(row("TASK-41")?.querySelector("[data-blocked-pill]")?.getAttribute("title")).toBe(
+			"Waiting on TASK-40 Pick a display face",
+		);
+		expect(row("TASK-41")?.querySelector("button")?.getAttribute("aria-label")).toBe(
+			"Open TASK-41: Swap the fonts. Waiting on TASK-40 Pick a display face",
+		);
+		expect(row("TASK-5")?.querySelector("[data-blocked-pill]")).toBeNull();
 	});
 });

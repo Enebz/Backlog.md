@@ -26,6 +26,8 @@ import { SuccessToast } from "./SuccessToast";
 import PersonAvatar from "./PersonAvatar";
 import { useWebUserName } from "../contexts/WebUserContext";
 import { askedBy, displayPerson, getWorkflow, topicLabels } from "../utils/workflow";
+import { describeBlocked, getBlockedStates, isBlockedLabel } from "../utils/blocked";
+import BlockedPill from "./BlockedPill";
 
 interface TaskListProps {
 	onEditTask: (task: Task) => void;
@@ -142,6 +144,8 @@ const TaskList: React.FC<TaskListProps> = ({
 	const [assigneeFilter, setAssigneeFilter] = useState(() => searchParams.get("assignee") ?? "");
 	const webUserName = useWebUserName();
 	const workflow = useMemo(() => getWorkflow(statusOptions), [statusOptions]);
+	// Read against every loaded task, so a search or filter never hides the card that blocks a row.
+	const blockedStates = useMemo(() => getBlockedStates(tasks, statusOptions), [tasks, statusOptions]);
 	const assigneeOptions = useMemo(() => {
 		const seen = new Set<string>();
 		for (const task of tasks) {
@@ -903,8 +907,11 @@ const TaskList: React.FC<TaskListProps> = ({
 							<tbody className="divide-y divide-gray-200 dark:divide-gray-700">
 								{sortedDisplayTasks.map((task) => {
 									const isFromOtherBranch = Boolean(task.branch);
+									const blocked = blockedStates.get(task.id);
+									const blockedLines = blocked ? describeBlocked(blocked) : [];
 									const requesters = askedBy(task.labels);
-									const topics = topicLabels(task.labels);
+									// The pill says blocked, so the label that makes it is not repeated.
+									const topics = topicLabels(task.labels).filter((label) => !blocked || !isBlockedLabel(label));
 									const visibleLabels = requesters.length > 0 ? [] : topics.slice(0, 2);
 									const labelOverflow = Math.max(topics.length - visibleLabels.length, 0);
 									const visibleAssignees = task.assignee.slice(0, 2);
@@ -924,7 +931,7 @@ const TaskList: React.FC<TaskListProps> = ({
 											<td className="px-3 py-2.5 text-xs font-mono text-gray-500 dark:text-gray-400 whitespace-nowrap">
 												{task.id}
 											</td>
-											<td className="px-3 py-2.5">
+											<td className="group/title px-3 py-2.5">
 												<div className="flex items-center gap-2 min-w-0">
 													<button
 														type="button"
@@ -938,10 +945,11 @@ const TaskList: React.FC<TaskListProps> = ({
 																: "text-gray-900 dark:text-gray-100"
 														} rounded text-left focus:outline-none focus:ring-2 focus:ring-stone-500`}
 														title={task.title}
-														aria-label={`Open ${task.id}: ${task.title}`}
+														aria-label={[`Open ${task.id}: ${task.title}`, ...blockedLines].join(". ")}
 													>
 														{task.title}
 													</button>
+													{blockedLines.length > 0 && <BlockedPill title={blockedLines.join("\n")} />}
 													{isFromOtherBranch && task.branch && (
 														<span
 															className="inline-flex shrink-0 items-center rounded-circle bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
@@ -951,6 +959,19 @@ const TaskList: React.FC<TaskListProps> = ({
 														</span>
 													)}
 												</div>
+												{blockedLines.length > 0 && (
+													<div
+														className="mt-1 hidden space-y-0.5 text-xs leading-snug text-red-700 group-has-[:focus-visible]/title:block dark:text-red-300"
+														aria-hidden="true"
+														data-blocked-reason
+													>
+														{blockedLines.map((line) => (
+															<p key={line} className="line-clamp-2">
+																{line}
+															</p>
+														))}
+													</div>
+												)}
 												<AcceptanceCriteriaProgress task={task} density="list" className="mt-1" />
 												{task.dueDate && (
 													<div className="mt-1 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
