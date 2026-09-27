@@ -21,6 +21,8 @@ import { isTerminalStatus } from "../../utils/terminal-status.ts";
 import { createUrlPath } from "../utils/urlHelpers";
 import { useWebUserName } from "../contexts/WebUserContext";
 import CommentThread from "./CommentThread";
+import BlockedBanner from "./BlockedBanner";
+import { getBlockedState } from "../utils/blocked";
 import PersonAvatar from "./PersonAvatar";
 import ReplyBox, { type ReplyAction } from "./ReplyBox";
 import {
@@ -1047,9 +1049,23 @@ export const TaskDetailsModal: React.FC<Props> = ({
   };
 
   // Statuses other than Draft decide what a card asks of the person at the board.
-  const workflow = useMemo(
-    () => getWorkflow(availableStatuses.filter((candidate) => candidate.trim().toLowerCase() !== "draft")),
+  const boardStatuses = useMemo(
+    () => availableStatuses.filter((candidate) => candidate.trim().toLowerCase() !== "draft"),
     [availableStatuses],
+  );
+  const workflow = useMemo(() => getWorkflow(boardStatuses), [boardStatuses]);
+  // Read from what is on screen (the status, labels and dependencies as shown, the thread as sent), so
+  // the banner follows a move or a reply at once.
+  const blockedState = useMemo(
+    () =>
+      task && !isOpenDraft && !isDraftMode
+        ? getBlockedState(
+            { ...task, status, labels, dependencies, comments: displayComments },
+            buildTaskIdIndex(availableTasks),
+            boardStatuses,
+          )
+        : null,
+    [task, isOpenDraft, isDraftMode, status, labels, dependencies, displayComments, availableTasks, boardStatuses],
   );
   const decisionKind =
     task && !isFromOtherBranch && !isOpenDraft && !isDraftMode ? decisionKindFor(task.status, workflow) : null;
@@ -1403,6 +1419,19 @@ export const TaskDetailsModal: React.FC<Props> = ({
       )}
 
 		<fieldset disabled={demoting} className="contents" aria-busy={demoting}>
+      {blockedState && task && (
+        <div onClickCapture={confirmNavigationAwayFromEdits}>
+          <BlockedBanner
+            taskId={task.id}
+            state={blockedState}
+            doneStatus={workflow.doneStatus}
+            webUserName={webUserName}
+            theme={theme}
+            dateFormat={dateFormat}
+            onOpenTask={onNavigateToTask}
+          />
+        </div>
+      )}
       {/* Cross-branch task indicator */}
       {isFromOtherBranch && (
         <div className="mb-4 flex items-center gap-2 px-4 py-3 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg text-amber-800 dark:text-amber-200">

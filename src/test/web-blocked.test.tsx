@@ -5,8 +5,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import type { Task } from "../types/index.ts";
 import BoardPage from "../web/components/BoardPage.tsx";
+import { TaskDetailsModal } from "../web/components/TaskDetailsModal";
 import TaskList from "../web/components/TaskList.tsx";
+import { ThemeProvider } from "../web/contexts/ThemeContext";
 import { WebUserProvider } from "../web/contexts/WebUserContext";
+import { apiClient } from "../web/lib/api.ts";
 
 const STATUSES = ["To Do", "Approved", "In Progress", "Waiting on you", "Done"];
 
@@ -239,5 +242,88 @@ describe("blocked rows in the task list", () => {
 			"Open TASK-41: Swap the fonts. Waiting on TASK-40 Pick a display face",
 		);
 		expect(row("TASK-5")?.querySelector("[data-blocked-pill]")).toBeNull();
+	});
+});
+
+describe("the blocked banner in the task view", () => {
+	const mountModal = async (current: Task) => {
+		const container = setupDom();
+		const navigated: string[] = [];
+		activeRoot = createRoot(container);
+		await act(async () => {
+			activeRoot?.render(
+				<MemoryRouter>
+					<ThemeProvider>
+						<WebUserProvider value="user">
+							<TaskDetailsModal
+								task={current}
+								isOpen
+								onClose={() => {}}
+								onNavigateToTask={(next) => navigated.push(next.id)}
+								availableStatuses={STATUSES}
+								availableTasks={tasks}
+							/>
+						</WebUserProvider>
+					</ThemeProvider>
+				</MemoryRouter>,
+			);
+			await Promise.resolve();
+		});
+		return { container, navigated, banner: () => container.querySelector("[data-blocked-banner]") };
+	};
+
+	it("says why, who and when, and the command that unblocks it", async () => {
+		const { banner } = await mountModal(tasks[0] as Task);
+		expect(banner()?.querySelector("[data-blocked-reason]")?.textContent).toContain(
+			"waiting on the user's call on the math (TASK-93).",
+		);
+		expect(banner()?.querySelector("[data-blocked-author]")?.getAttribute("data-blocked-author")).toBe("sugar-bounce");
+		const when = Array.from(banner()?.querySelectorAll("span[title]") ?? []).find((span) =>
+			span.getAttribute("title")?.includes("2026-09-27 03:10"),
+		);
+		expect(when).toBeTruthy();
+		expect(Array.from(banner()?.querySelectorAll("[data-unblock-command]") ?? []).map((code) => code.textContent)).toEqual([
+			"backlog task edit TASK-42 --remove-label blocked",
+		]);
+	});
+
+	it("links the cards it waits on, and opens them in place", async () => {
+		const { banner, navigated } = await mountModal(tasks[3] as Task);
+		const link = banner()?.querySelector("[data-waiting-on='TASK-40'] a");
+		expect(link?.textContent).toBe("TASK-40 Pick a display face");
+		expect(link?.getAttribute("href")).toBe("/tasks/TASK-40/pick-a-display-face");
+		await click(link);
+		expect(navigated).toEqual(["TASK-40"]);
+		expect(Array.from(banner()?.querySelectorAll("[data-unblock-command]") ?? []).map((code) => code.textContent)).toEqual([
+			"backlog task edit TASK-40 -s Done",
+		]);
+	});
+
+	it("goes when the card is moved to Done, and is absent on a card that is not blocked", async () => {
+		const originalUpdateTask = apiClient.updateTask.bind(apiClient);
+		apiClient.updateTask = () => new Promise(() => {});
+		try {
+			const { container, banner } = await mountModal(tasks[1] as Task);
+			expect(banner()).toBeTruthy();
+			const select = Array.from(container.querySelectorAll("select")).find((element) =>
+				Array.from(element.options).some((option) => option.value === "Done"),
+			) as HTMLSelectElement;
+			await act(async () => {
+				const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
+				valueSetter?.call(select, "Done");
+				select.dispatchEvent(new window.Event("change", { bubbles: true }));
+				await Promise.resolve();
+			});
+			expect(banner()).toBeNull();
+		} finally {
+			apiClient.updateTask = originalUpdateTask;
+		}
+
+		act(() => {
+			activeRoot?.unmount();
+		});
+		activeRoot = null;
+		const { banner } = await mountModal(tasks[4] as Task);
+		expect(banner()).toBeNull();
 	});
 });
