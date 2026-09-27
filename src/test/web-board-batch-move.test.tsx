@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Milestone, Task } from "../types/index.ts";
 import Board from "../web/components/Board.tsx";
+import type { FilterState } from "../web/utils/filters.ts";
 import { apiClient, type MoveTasksPayload } from "../web/lib/api.ts";
 
 const STATUSES = ["To Do", "In Progress", "Done"];
@@ -46,7 +47,7 @@ const renderBoard = (
 		onTasksUpdated?: (tasks: Task[], requestTask: Task) => void;
 		onRefreshData?: () => Promise<void>;
 		tasks?: Task[];
-		filterPriority?: string;
+		filters?: FilterState;
 	} = {},
 ): HTMLElement => {
 	setupDom();
@@ -64,7 +65,7 @@ const rerenderBoard = (
 		onTasksUpdated?: (tasks: Task[], requestTask: Task) => void;
 		onRefreshData?: () => Promise<void>;
 		tasks?: Task[];
-		filterPriority?: string;
+		filters?: FilterState;
 	} = {},
 ) => {
 	act(() => {
@@ -83,7 +84,7 @@ const rerenderBoard = (
 				onLaneChange={() => {}}
 				onTasksUpdated={extra.onTasksUpdated}
 				onRefreshData={extra.onRefreshData}
-				filterPriority={extra.filterPriority}
+				filters={extra.filters}
 			/>,
 		);
 	});
@@ -510,7 +511,7 @@ describe("Web board batch move", () => {
 
 			// The priority filter hides TASK-1, so it must drop out of the selection instead of riding
 			// along invisibly in the next batch move.
-			rerenderBoard(() => {}, { tasks, filterPriority: "high" });
+			rerenderBoard(() => {}, { tasks, filters: { priority: { include: ["high"], exclude: [] } } });
 			expect(selectedCardIds(container).sort()).toEqual(["TASK-2", "TASK-3"]);
 
 			await act(async () => {

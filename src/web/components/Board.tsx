@@ -2,21 +2,32 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { type Milestone, type Task } from '../../types';
 import { apiClient, type ReorderTaskPayload } from '../lib/api';
 import { buildLanes, DEFAULT_LANE_KEY, groupTasksByLaneAndStatus, type LaneMode, sortTasksForStatus } from '../lib/lanes';
-import { collectAvailableLabels, labelsToLower } from '../../utils/label-filter';
 import { collectArchivedMilestoneKeys, milestoneKey } from '../utils/milestones';
 import { getTerminalStatus } from '../../utils/terminal-status';
-import { getPriorityOptions, normalizePriorityValue } from '../../utils/priority-config';
-import { getProjectValues, matchesProjectFilter } from '../../utils/project-config';
-import { getTaskTypeValues, matchesTaskTypeFilter } from '../../utils/task-type-config';
+import { getProjectValues } from '../../utils/project-config';
+import { getTaskTypeValues } from '../../utils/task-type-config';
 import { resolveTaskById } from '../../utils/task-id';
 import TaskColumn from './TaskColumn';
 import { BoardLoadingSkeleton } from './BoardLoadingSkeleton';
 import CleanupModal from './CleanupModal';
-import LabelFilterDropdown from './LabelFilterDropdown';
+import FilterBar from './FilterBar';
+import { ExcludeIcon } from './FilterMenu';
 import { SuccessToast } from './SuccessToast';
 import { useWebUserName } from '../contexts/WebUserContext';
-import { askedBy, decisionKindFor, displayPerson, getWorkflow, hasUserReplied, statusQueue } from '../utils/workflow';
+import { decisionKindFor, getWorkflow, hasUserReplied, statusQueue } from '../utils/workflow';
 import { getBlockedStates } from '../utils/blocked';
+import {
+  applyFilters,
+  BLOCKED_VALUE,
+  type FilterContext,
+  type FilterKey,
+  type FilterState,
+  isSelectionEmpty,
+  optionState,
+  setOptionState,
+  valuesPassSelection,
+} from '../utils/filters';
+import { useTaskFilterDefinitions } from './taskFilterDefinitions';
 
 interface BoardProps {
   onEditTask: (task: Task) => void;
@@ -35,32 +46,29 @@ interface BoardProps {
   archivedMilestones: Milestone[];
   laneMode: LaneMode;
   onLaneChange: (mode: LaneMode) => void;
-  milestoneFilter?: string | null;
-  filterAssignee?: string;
-  filterLabels?: string[];
-  filterPriority?: string;
   availablePriorities?: string[];
-  filterType?: string;
   availableTypes?: string[];
-  filterProject?: string;
   availableProjects?: string[];
-  filterAskedBy?: string;
-  filterBlocked?: boolean;
-  onFiltersChange?: (filters: BoardFilters) => void;
+  /** The board's filters, as the address holds them (see ../utils/filters). */
+  filters?: FilterState;
+  onFiltersChange?: (filters: FilterState) => void;
   hideEmptyColumns?: boolean;
   dateFormat?: string;
 }
 
-export interface BoardFilters {
-  assignee: string;
-  labels: string[];
-  priority: string;
-  taskType: string;
-  project: string;
-  askedBy: string;
-  /** Only the blocked cards. */
-  blocked: boolean;
-}
+/** The filters the board offers, in the order it shows them. Blocked is set from the strip above the board. */
+export const BOARD_FILTER_KEYS: readonly FilterKey[] = [
+  'assignee',
+  'askedBy',
+  'label',
+  'type',
+  'project',
+  'priority',
+  'milestone',
+  'blocked',
+];
+
+const NO_FILTERS: FilterState = {};
 
 const BOARD_FILTER_SELECT_CLASS =
   'min-w-[140px] h-10 py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200';
@@ -79,22 +87,16 @@ const Board: React.FC<BoardProps> = ({
   isLoading,
   loadingMessage,
   loadError,
+  milestones,
   availableLabels,
   milestoneEntities,
   archivedMilestones,
   laneMode,
   onLaneChange,
-  milestoneFilter,
-  filterAssignee = '',
-  filterLabels = [],
-  filterPriority = '',
   availablePriorities,
-  filterType = '',
   availableTypes,
-  filterProject = '',
   availableProjects,
-  filterAskedBy = '',
-  filterBlocked = false,
+  filters = NO_FILTERS,
   onFiltersChange,
   hideEmptyColumns = false,
   dateFormat,
@@ -114,14 +116,9 @@ const Board: React.FC<BoardProps> = ({
   const [showCleanupModal, setShowCleanupModal] = useState(false);
   const [cleanupSuccessMessage, setCleanupSuccessMessage] = useState<string | null>(null);
   const [collapsedLanes, setCollapsedLanes] = useState<Record<string, boolean>>({});
-  const [showFiltersOnPhone, setShowFiltersOnPhone] = useState(false);
   const terminalStatus = getTerminalStatus(statuses);
   const webUserName = useWebUserName();
   const workflow = useMemo(() => getWorkflow(statuses), [statuses]);
-  const priorityOptions = useMemo(
-    () => [{ label: 'All priorities', value: '' }, ...getPriorityOptions(availablePriorities)],
-    [availablePriorities]
-  );
   const typeOptions = useMemo(() => getTaskTypeValues(availableTypes), [availableTypes]);
   const projectOptions = useMemo(() => getProjectValues(availableProjects), [availableProjects]);
   const archivedMilestoneIds = useMemo(
@@ -258,26 +255,6 @@ const Board: React.FC<BoardProps> = ({
     }
     return normalized;
   };
-  const canonicalMilestoneFilter = canonicalizeMilestone(milestoneFilter);
-
-  // Collect unique assignees and labels from all tasks for filter dropdowns
-  const uniqueAssignees = useMemo(() => {
-    const seen = new Set<string>();
-    for (const task of tasks) {
-      for (const a of task.assignee) {
-        if (a.trim()) seen.add(a.trim());
-      }
-    }
-    return Array.from(seen).sort((a, b) => a.localeCompare(b));
-  }, [tasks]);
-
-  const uniqueRequesters = useMemo(() => {
-    const seen = new Set<string>();
-    for (const task of tasks) {
-      for (const name of askedBy(task.labels)) seen.add(name);
-    }
-    return Array.from(seen).sort((a, b) => a.localeCompare(b));
-  }, [tasks]);
 
   // The person's two queues, over the whole board: proposals to approve and questions to answer.
   const decisionQueues = useMemo(() => {
@@ -289,77 +266,48 @@ const Board: React.FC<BoardProps> = ({
     };
   }, [tasks, workflow, webUserName]);
 
-  const uniqueLabels = useMemo(
-    () => collectAvailableLabels(tasks, availableLabels),
-    [tasks, availableLabels]
-  );
-
-  const normalizedFilterLabels = useMemo(
-    () => filterLabels.map(label => label.trim()).filter(label => label.length > 0),
-    [filterLabels]
-  );
-
-  const hasActiveFilters =
-    filterBlocked ||
-    filterAskedBy !== '' ||
-    filterAssignee !== '' ||
-    normalizedFilterLabels.length > 0 ||
-    filterPriority !== '' ||
-    filterType !== '' ||
-    filterProject !== '';
-
   // Blocked is read against the whole board, so a filter never hides the dependency that blocks a card.
   const blockedStates = useMemo(() => getBlockedStates(tasks, statuses), [tasks, statuses]);
 
-  // Filter tasks by milestone when milestoneFilter is set, then apply assignee/label/priority filters
-  const tasksMatchingFilters = useMemo(() => {
-    let result = tasks;
-    if (milestoneFilter) {
-      result = result.filter(task => canonicalizeMilestone(task.milestone) === canonicalMilestoneFilter);
-    }
-    if (filterAssignee === '__unassigned__') {
-      result = result.filter(task => !task.assignee || task.assignee.length === 0 || task.assignee.every(a => !a.trim()));
-    } else if (filterAssignee) {
-      result = result.filter(task => task.assignee.some(a => a.trim() === filterAssignee));
-    }
-    if (normalizedFilterLabels.length > 0) {
-      const selectedLabels = new Set(labelsToLower(normalizedFilterLabels));
-      result = result.filter(task => labelsToLower(task.labels).some(label => selectedLabels.has(label)));
-    }
-    if (filterPriority) {
-      const normalizedFilterPriority = normalizePriorityValue(filterPriority);
-      result = result.filter(task => normalizePriorityValue(task.priority) === normalizedFilterPriority);
-    }
-    if (filterType) {
-      result = result.filter(task => matchesTaskTypeFilter(task.type, filterType));
-    }
-    if (filterProject) {
-      result = result.filter(task => matchesProjectFilter(task.project, filterProject));
-    }
-    if (filterAskedBy) {
-      const wanted = filterAskedBy.toLowerCase();
-      result = result.filter(task => askedBy(task.labels).some(name => name.toLowerCase() === wanted));
-    }
-    return result;
-  }, [tasks, milestoneFilter, canonicalMilestoneFilter, milestoneAliasToCanonical, filterAssignee, normalizedFilterLabels, filterPriority, filterType, filterProject, filterAskedBy]);
+  const filterContext = useMemo<FilterContext>(
+    () => ({
+      milestoneKey: (value) => milestoneKey(canonicalizeMilestone(value)),
+      isBlocked: (task) => blockedStates.has(task.id),
+    }),
+    // canonicalizeMilestone reads only the alias map.
+    [milestoneAliasToCanonical, blockedStates]
+  );
 
+  const filteredTasks = useMemo(() => applyFilters(tasks, filters, filterContext), [tasks, filters, filterContext]);
+  // Lane counts and progress follow every filter but the milestone one, which picks the lanes to open.
+  const laneMetadataTasks = useMemo(
+    () => applyFilters(tasks, filters, filterContext, 'milestone'),
+    [tasks, filters, filterContext]
+  );
   // The quick filter counts what it would show under the other filters.
   const blockedTasks = useMemo(
-    () => tasksMatchingFilters.filter(task => blockedStates.has(task.id)),
-    [tasksMatchingFilters, blockedStates]
+    () => applyFilters(tasks, filters, filterContext, 'blocked').filter(task => blockedStates.has(task.id)),
+    [tasks, filters, filterContext, blockedStates]
   );
-  const filteredTasks = filterBlocked ? blockedTasks : tasksMatchingFilters;
+  const blockedFilter = optionState(filters.blocked, BLOCKED_VALUE, (value) => value);
+  const setBlockedFilter = (next: 'include' | 'exclude' | 'off') =>
+    onFiltersChange?.({ ...filters, blocked: setOptionState(filters.blocked, BLOCKED_VALUE, next, (value) => value) });
 
-  const currentFilters: BoardFilters = {
-    assignee: filterAssignee,
-    labels: normalizedFilterLabels,
-    priority: filterPriority,
-    taskType: filterType,
-    project: filterProject,
-    askedBy: filterAskedBy,
-    blocked: filterBlocked,
-  };
-  const changeFilters = (changes: Partial<BoardFilters>) => onFiltersChange?.({ ...currentFilters, ...changes });
+  const filterDefinitions = useTaskFilterDefinitions({
+    keys: BOARD_FILTER_KEYS,
+    tasks,
+    filters,
+    context: filterContext,
+    webUserName,
+    availableLabels,
+    availablePriorities,
+    typeOptions,
+    projectOptions,
+    milestoneEntities,
+    milestoneIds: milestones,
+    // Set from the strip above the board, so only its chip shows with the other filters.
+    blockedControl: 'chips',
+  });
 
   // Handle highlighting a task (opening its edit popup)
   useEffect(() => {
@@ -537,18 +485,8 @@ const Board: React.FC<BoardProps> = ({
     });
   }, [tasks, archivedMilestoneIds, milestoneAliasToCanonical]);
 
-  // Use all tasks for lane grouping (for counts and visibility)
-  const tasksByLane = useMemo(
-    () => groupTasksByLaneAndStatus(laneMode, lanes, statuses, tasks, {
-      archivedMilestoneIds,
-      milestoneEntities,
-      archivedMilestones,
-    }),
-    [laneMode, lanes, statuses, tasks, archivedMilestoneIds, milestoneEntities, archivedMilestones]
-  );
-
-  // Separate grouping for filtered display in columns
-  const filteredTasksByLane = useMemo(
+  // The cards the columns show, and the ones lane counts and progress are read from.
+  const displayTasksByLane = useMemo(
     () =>
       groupTasksByLaneAndStatus(laneMode, lanes, statuses, filteredTasks, {
         archivedMilestoneIds,
@@ -557,9 +495,17 @@ const Board: React.FC<BoardProps> = ({
       }),
     [laneMode, lanes, statuses, filteredTasks, archivedMilestoneIds, milestoneEntities, archivedMilestones]
   );
-
-  const displayTasksByLane = (milestoneFilter || hasActiveFilters) ? filteredTasksByLane : tasksByLane;
-  const laneMetadataTasksByLane = hasActiveFilters ? filteredTasksByLane : tasksByLane;
+  const laneMetadataTasksByLane = useMemo(
+    () =>
+      laneMetadataTasks === filteredTasks
+        ? displayTasksByLane
+        : groupTasksByLaneAndStatus(laneMode, lanes, statuses, laneMetadataTasks, {
+            archivedMilestoneIds,
+            milestoneEntities,
+            archivedMilestones,
+          }),
+    [laneMode, lanes, statuses, laneMetadataTasks, filteredTasks, displayTasksByLane, archivedMilestoneIds, milestoneEntities, archivedMilestones]
+  );
 
   const getTasksForLane = (laneKey: string, status: string): Task[] => {
     const statusMap = displayTasksByLane.get(laneKey);
@@ -651,17 +597,17 @@ const Board: React.FC<BoardProps> = ({
     return visibleLanes.length > 1;
   }, [laneMode, visibleLanes]);
 
-  // Determine if a lane should be collapsed (respects milestoneFilter)
+  // Determine if a lane should be collapsed (respects the milestone filter)
   const isLaneCollapsed = (laneKey: string, laneMilestone?: string): boolean => {
     // If user manually toggled, respect that
     if (collapsedLanes[laneKey] !== undefined) {
       return collapsedLanes[laneKey];
     }
-    // When filtering by milestone, collapse all other lanes by default
-    if (milestoneFilter && canonicalizeMilestone(laneMilestone) !== canonicalMilestoneFilter) {
-      return true;
-    }
-    return false;
+    // When filtering by milestone, the lanes the filter leaves out start collapsed
+    return (
+      !isSelectionEmpty(filters.milestone) &&
+      !valuesPassSelection('milestone', [laneMilestone], filters.milestone, filterContext)
+    );
   };
 
   const getLaneLabel = (lane: typeof lanes[0]): string => {
@@ -698,7 +644,7 @@ const Board: React.FC<BoardProps> = ({
     });
     setSelectionAnchorId((previous) => (previous && visibleIds.has(previous) ? previous : null));
     // biome-ignore lint/correctness/useExhaustiveDependencies: isLaneCollapsed is a plain render-scope helper; its inputs are listed.
-  }, [filteredTasks, laneMode, lanes, displayTasksByLane, collapsedLanes, milestoneFilter, canonicalMilestoneFilter]);
+  }, [filteredTasks, laneMode, lanes, displayTasksByLane, collapsedLanes, filters.milestone, filterContext]);
 
   // Dynamic layout using flexbox:
   // - Columns are flex items with equal growth (flex-1) to divide space evenly
@@ -738,7 +684,7 @@ const Board: React.FC<BoardProps> = ({
             + New Task
           </button>
         </div>
-        {(decisionQueues.questions.length > 0 || decisionQueues.proposals.length > 0 || blockedTasks.length > 0 || filterBlocked) && (
+        {(decisionQueues.questions.length > 0 || decisionQueues.proposals.length > 0 || blockedTasks.length > 0 || blockedFilter !== 'off') && (
           <div className="flex flex-wrap gap-3">
             {(decisionQueues.questions.length > 0 || decisionQueues.proposals.length > 0) && (
               <div className="contents" role="region" aria-label="Decisions waiting">
@@ -772,28 +718,52 @@ const Board: React.FC<BoardProps> = ({
                 )}
               </div>
             )}
-            {onFiltersChange && (blockedTasks.length > 0 || filterBlocked) && (
-              <button
-                type="button"
-                aria-pressed={filterBlocked}
-                onClick={() => changeFilters({ blocked: !filterBlocked })}
-                className={`group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border px-4 py-3 text-left transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-red-500 sm:flex-none ${
-                  filterBlocked
+            {onFiltersChange && (blockedTasks.length > 0 || blockedFilter !== 'off') && (
+              <div
+                role="group"
+                aria-label="Blocked cards"
+                className={`flex min-w-[15rem] flex-1 items-stretch overflow-hidden rounded-lg border transition-colors duration-150 sm:flex-none ${
+                  blockedFilter === 'include'
                     ? 'border-red-400 bg-red-100 dark:border-red-600 dark:bg-red-950/60'
-                    : 'border-red-200 bg-red-50 hover:border-red-300 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:hover:bg-red-950/50'
+                    : 'border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/30'
                 }`}
               >
-                <span className="text-2xl font-bold tabular-nums text-red-700 dark:text-red-300">{blockedTasks.length}</span>
-                <span className="min-w-0 flex-1 text-sm text-red-900 dark:text-red-100">
-                  <span className="block font-semibold">Blocked</span>
-                  <span className="block text-xs text-red-800/80 dark:text-red-200/80">
-                    {filterBlocked ? 'only these are shown' : 'cards waiting on something'}
+                <button
+                  type="button"
+                  aria-pressed={blockedFilter === 'include'}
+                  onClick={() => setBlockedFilter(blockedFilter === 'include' ? 'off' : 'include')}
+                  className="group flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left transition-colors duration-150 hover:bg-red-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500 dark:hover:bg-red-950/50"
+                >
+                  <span className="text-2xl font-bold tabular-nums text-red-700 dark:text-red-300">{blockedTasks.length}</span>
+                  <span className="min-w-0 flex-1 text-sm text-red-900 dark:text-red-100">
+                    <span className="block font-semibold">Blocked</span>
+                    <span className="block text-xs text-red-800/80 dark:text-red-200/80">
+                      {blockedFilter === 'include'
+                        ? 'only these are shown'
+                        : blockedFilter === 'exclude'
+                          ? 'hidden from the board'
+                          : 'cards waiting on something'}
+                    </span>
                   </span>
-                </span>
-                <span className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-red-700 dark:bg-red-700 dark:group-hover:bg-red-600">
-                  {filterBlocked ? 'Show all' : 'Show'}
-                </span>
-              </button>
+                  <span className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-red-700 dark:bg-red-700 dark:group-hover:bg-red-600">
+                    {blockedFilter === 'include' ? 'Show all' : 'Show'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={blockedFilter === 'exclude'}
+                  aria-label="Hide blocked cards"
+                  title={blockedFilter === 'exclude' ? 'Show blocked cards again' : 'Hide blocked cards'}
+                  onClick={() => setBlockedFilter(blockedFilter === 'exclude' ? 'off' : 'exclude')}
+                  className={`flex w-12 shrink-0 items-center justify-center border-l transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500 ${
+                    blockedFilter === 'exclude'
+                      ? 'border-red-600 bg-red-600 text-white hover:bg-red-700 dark:border-red-700 dark:bg-red-700'
+                      : 'border-red-200 text-red-600 hover:bg-red-100 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/50'
+                  }`}
+                >
+                  <ExcludeIcon className="h-5 w-5" />
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -865,99 +835,14 @@ const Board: React.FC<BoardProps> = ({
               </button>
             </div>
             {onFiltersChange && (
-              <button
-                type="button"
-                onClick={() => setShowFiltersOnPhone((shown) => !shown)}
-                aria-expanded={showFiltersOnPhone}
-                className={`${BOARD_FILTER_BUTTON_CLASS} sm:hidden`}
-              >
-                {showFiltersOnPhone ? 'Hide filters' : hasActiveFilters ? 'Filters (on)' : 'Filters'}
-              </button>
-            )}
-            {onFiltersChange && (
-              <div className={`${showFiltersOnPhone ? 'flex' : 'hidden'} sm:flex flex-wrap items-center gap-3`} aria-label="Board filters">
-                <select
-                  aria-label="Filter board by assignee"
-                  value={filterAssignee}
-                  onChange={e => changeFilters({ assignee: e.target.value })}
-                  className={BOARD_FILTER_SELECT_CLASS}
-                >
-                  <option value="">All assignees</option>
-                  <option value="__unassigned__">Unassigned</option>
-                  {uniqueAssignees.map(a => (
-                    <option key={a} value={a}>{displayPerson(a, webUserName) === 'You' ? `You (${a})` : a}</option>
-                  ))}
-                </select>
-
-                {uniqueRequesters.length > 0 && (
-                  <select
-                    aria-label="Filter board by who asked"
-                    value={filterAskedBy}
-                    onChange={e => changeFilters({ askedBy: e.target.value })}
-                    className={BOARD_FILTER_SELECT_CLASS}
-                  >
-                    <option value="">Asked by anyone</option>
-                    {uniqueRequesters.map(name => (
-                      <option key={name} value={name}>Asked by {name}</option>
-                    ))}
-                  </select>
-                )}
-
-                <LabelFilterDropdown
-                  availableLabels={uniqueLabels}
-                  selectedLabels={normalizedFilterLabels}
-                  onChange={labels => changeFilters({ labels })}
-                  menuId="board-labels-filter-menu"
-                  className="min-w-[200px]"
-                />
-
-                <select
-                  aria-label="Filter board by type"
-                  value={filterType}
-                  onChange={e => changeFilters({ taskType: e.target.value })}
-                  className={BOARD_FILTER_SELECT_CLASS}
-                >
-                  <option value="">All types</option>
-                  {typeOptions.map(type => (
-                    <option key={type} value={type}>{type}</option>
-                  ))}
-                </select>
-
-                {projectOptions.length > 0 && (
-                  <select
-                    aria-label="Filter board by project"
-                    value={filterProject}
-                    onChange={e => changeFilters({ project: e.target.value })}
-                    className={BOARD_FILTER_SELECT_CLASS}
-                  >
-                    <option value="">All projects</option>
-                    {projectOptions.map(project => (
-                      <option key={project} value={project}>{project}</option>
-                    ))}
-                  </select>
-                )}
-
-                <select
-                  aria-label="Filter board by priority"
-                  value={filterPriority}
-                  onChange={e => changeFilters({ priority: e.target.value })}
-                  className={BOARD_FILTER_SELECT_CLASS}
-                >
-                  {priorityOptions.map(opt => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-
-                {hasActiveFilters && (
-                  <button
-                    type="button"
-                    onClick={() => onFiltersChange({ assignee: '', labels: [], priority: '', taskType: '', project: '', askedBy: '', blocked: false })}
-                    className={BOARD_FILTER_BUTTON_CLASS}
-                  >
-                    Clear filters
-                  </button>
-                )}
-              </div>
+              <FilterBar
+                id="board-filter"
+                label="Board filters"
+                definitions={filterDefinitions}
+                filters={filters}
+                onChange={onFiltersChange}
+                countNoun="cards"
+              />
             )}
         </div>
       </div>

@@ -10,6 +10,7 @@ import TaskCard from "../web/components/TaskCard.tsx";
 import { TaskDetailsModal } from "../web/components/TaskDetailsModal.tsx";
 import { ThemeProvider } from "../web/contexts/ThemeContext.tsx";
 import { apiClient, type TaskUpdateRequest } from "../web/lib/api.ts";
+import { clickOption, excludeOption, filterSummary, openFilter, optionLabels } from "./filter-menu-helpers.ts";
 import { setNativeInputValue } from "./react-dom-input.ts";
 
 const createTask = (overrides: Partial<Task> = {}): Task => ({
@@ -308,29 +309,30 @@ describe("Web board project filter", () => {
 		return container;
 	};
 
-	it("omits the project filter select when no projects are configured", () => {
+	it("omits the project filter when no projects are configured", () => {
 		const container = renderBoardPage(undefined, undefined);
-		expect(container.querySelector("select[aria-label='Filter board by project']")).toBeNull();
+		expect(container.querySelector("#board-filter-project")).toBeNull();
 	});
 
 	it("filters board cards by project and updates the URL", async () => {
 		const container = renderBoardPage(undefined, ["Web", "API"]);
 
-		const projectSelect = container.querySelector(
-			"select[aria-label='Filter board by project']",
-		) as HTMLSelectElement | null;
-		expect(projectSelect).toBeTruthy();
-		expect(Array.from(projectSelect?.options ?? []).map((option) => option.textContent)).toEqual([
-			"All projects",
-			"Web",
-			"API",
-		]);
+		await openFilter(container, "board-filter-project");
+		expect(optionLabels(container, "board-filter-project")).toEqual(["No project", "Web", "API"]);
 
-		await setSelectValue(projectSelect as HTMLSelectElement, "Web");
+		await clickOption(container, "board-filter-project", "Web");
 		expect(new URLSearchParams(window.location.search).get("project")).toBe("Web");
-		const text = container.textContent ?? "";
+		let text = container.textContent ?? "";
 		expect(text).toContain("Web task");
 		expect(text).not.toContain("API task");
+		expect(text).not.toContain("Unprojected task");
+
+		await excludeOption(container, "board-filter-project", "No project");
+		await clickOption(container, "board-filter-project", "API");
+		expect(new URLSearchParams(window.location.search).get("project")).toBe("Web,API,-__none");
+		text = container.textContent ?? "";
+		expect(text).toContain("Web task");
+		expect(text).toContain("API task");
 		expect(text).not.toContain("Unprojected task");
 	});
 
@@ -339,10 +341,7 @@ describe("Web board project filter", () => {
 
 		await waitFor(() => new URLSearchParams(window.location.search).get("project") === null);
 
-		const projectSelect = container.querySelector(
-			"select[aria-label='Filter board by project']",
-		) as HTMLSelectElement | null;
-		expect(projectSelect?.value).toBe("");
+		expect(filterSummary(container, "board-filter-project")).toBe("All");
 		const text = container.textContent ?? "";
 		expect(text).toContain("Web task");
 		expect(text).toContain("API task");

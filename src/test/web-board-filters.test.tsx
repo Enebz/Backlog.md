@@ -6,6 +6,14 @@ import { BrowserRouter } from "react-router-dom";
 import type { Task } from "../types/index.ts";
 import BoardPage from "../web/components/BoardPage.tsx";
 import { apiClient } from "../web/lib/api.ts";
+import {
+	clickOption,
+	filterSummary,
+	filterTrigger,
+	findButton,
+	openFilter,
+	optionLabels,
+} from "./filter-menu-helpers.ts";
 import { pinTimeZone } from "./pin-timezone.ts";
 
 const createTask = (overrides: Partial<Task>): Task => ({
@@ -136,23 +144,6 @@ const renderBoardPage = (
 	return container as HTMLElement;
 };
 
-const getSelectByFirstOption = (container: HTMLElement, firstOptionText: string): HTMLSelectElement => {
-	const select = Array.from(container.querySelectorAll("select")).find(
-		(element) => element.options[0]?.textContent === firstOptionText,
-	);
-	expect(select).toBeTruthy();
-	return select as HTMLSelectElement;
-};
-
-const setSelectValue = async (select: HTMLSelectElement, value: string) => {
-	await act(async () => {
-		const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
-		valueSetter?.call(select, value);
-		select.dispatchEvent(new window.Event("change", { bubbles: true }));
-		await Promise.resolve();
-	});
-};
-
 const clickElement = async (element: Element) => {
 	await act(async () => {
 		element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -177,13 +168,6 @@ const waitFor = async (predicate: () => boolean) => {
 	}
 };
 
-const toggleCheckbox = async (checkbox: HTMLInputElement) => {
-	await act(async () => {
-		checkbox.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-		await Promise.resolve();
-	});
-};
-
 const expectVisibleTasks = (container: HTMLElement, expected: string[]) => {
 	const text = container.textContent ?? "";
 	for (const title of expected) {
@@ -195,6 +179,8 @@ const expectVisibleTasks = (container: HTMLElement, expected: string[]) => {
 		}
 	}
 };
+
+const searchParams = () => new URLSearchParams(window.location.search);
 
 const expectBoardFiltersInHeader = (container: HTMLElement) => {
 	const toolbar = container.querySelector("[aria-label='Board view controls']");
@@ -218,41 +204,24 @@ const expectBoardFiltersInHeader = (container: HTMLElement) => {
 
 	const boardFilters = toolbar?.querySelector("[aria-label='Board filters']");
 	expect(boardFilters).toBeTruthy();
+	expect(container.querySelector("select")).toBeNull();
 
-	for (const ariaLabel of ["Filter board by assignee", "Filter board by type", "Filter board by priority"]) {
-		const select = container.querySelector(`select[aria-label='${ariaLabel}']`) as HTMLSelectElement | null;
-		expect(select).toBeTruthy();
-		expect(toolbar?.contains(select)).toBe(true);
-		expect(select?.className).toContain("min-w-[140px]");
-		expect(select?.className).toContain("h-10");
-		expect(select?.className).toContain("rounded-lg");
-		expect(select?.className).toContain("border-gray-300");
-		expect(select?.className).toContain("focus:ring-stone-500");
+	for (const [key, label] of [
+		["assignee", "Assignee"],
+		["label", "Labels"],
+		["type", "Type"],
+		["priority", "Priority"],
+	] as const) {
+		const trigger = filterTrigger(container, `board-filter-${key}`);
+		expect(boardFilters?.contains(trigger)).toBe(true);
+		expect(trigger.textContent).toContain(label);
+		expect(trigger.getAttribute("aria-expanded")).toBe("false");
+		expect(trigger.getAttribute("aria-controls")).toBe(`board-filter-${key}-menu`);
+		expect(trigger.className).toContain("h-10");
+		expect(trigger.className).toContain("rounded-lg");
+		expect(trigger.className).toContain("border-gray-300");
+		expect(trigger.className).toContain("focus-visible:ring-stone-500");
 	}
-
-	expect(container.querySelector("select[aria-label='Filter board by label']")).toBeNull();
-	const labelsButton = getBoardLabelsButton(container);
-	expect(toolbar?.contains(labelsButton)).toBe(true);
-	expect(labelsButton.className).toContain("min-w-[200px]");
-	expect(labelsButton.className).toContain("rounded-lg");
-	expect(labelsButton.className).toContain("border-gray-300");
-	expect(labelsButton.className).toContain("focus:ring-stone-500");
-};
-
-const getBoardLabelsButton = (container: HTMLElement): HTMLButtonElement => {
-	const button = container.querySelector("button[aria-controls='board-labels-filter-menu']");
-	expect(button).toBeTruthy();
-	return button as HTMLButtonElement;
-};
-
-const getBoardLabelCheckbox = (container: HTMLElement, label: string): HTMLInputElement => {
-	const labelElement = Array.from(container.querySelectorAll("#board-labels-filter-menu label")).find(
-		(element) => element.textContent?.trim() === label,
-	);
-	expect(labelElement).toBeTruthy();
-	const checkbox = labelElement?.querySelector("input[type='checkbox']");
-	expect(checkbox).toBeTruthy();
-	return checkbox as HTMLInputElement;
 };
 
 afterEach(() => {
@@ -322,26 +291,27 @@ describe("Web board filters", () => {
 		expectBoardFiltersInHeader(container);
 		expectVisibleTasks(container, ["Fix login bug", "Write docs", "Improve board", "Triage unassigned issue"]);
 
-		await setSelectValue(getSelectByFirstOption(container, "All assignees"), "alice");
-		expect(new URLSearchParams(window.location.search).get("assignee")).toBe("alice");
+		await clickOption(container, "board-filter-assignee", "alice");
+		expect(searchParams().get("assignee")).toBe("alice");
+		expect(filterSummary(container, "board-filter-assignee")).toBe("alice");
 		expectVisibleTasks(container, ["Fix login bug", "Improve board"]);
 
-		await clickElement(getBoardLabelsButton(container));
-		await toggleCheckbox(getBoardLabelCheckbox(container, "bug"));
-		expect(new URLSearchParams(window.location.search).getAll("label")).toEqual(["bug"]);
+		await clickOption(container, "board-filter-label", "bug");
+		expect(searchParams().get("label")).toBe("bug");
 		expectVisibleTasks(container, ["Fix login bug"]);
 
-		await toggleCheckbox(getBoardLabelCheckbox(container, "enhancement"));
-		expect(new URLSearchParams(window.location.search).getAll("label")).toEqual(["bug", "enhancement"]);
-		expect(getBoardLabelsButton(container).textContent).toContain("2 selected");
+		await clickOption(container, "board-filter-label", "enhancement");
+		expect(searchParams().get("label")).toBe("bug,enhancement");
+		expect(window.location.search).toContain("label=bug,enhancement");
+		expect(filterSummary(container, "board-filter-label")).toBe("bug +1");
 		expectVisibleTasks(container, ["Fix login bug", "Improve board"]);
 
-		await setSelectValue(getSelectByFirstOption(container, "All types"), "Bug");
-		expect(new URLSearchParams(window.location.search).get("type")).toBe("Bug");
+		await clickOption(container, "board-filter-type", "Bug");
+		expect(searchParams().get("type")).toBe("Bug");
 		expectVisibleTasks(container, ["Fix login bug"]);
 
-		await setSelectValue(getSelectByFirstOption(container, "All priorities"), "high");
-		expect(new URLSearchParams(window.location.search).get("priority")).toBe("high");
+		await clickOption(container, "board-filter-priority", "High");
+		expect(searchParams().get("priority")).toBe("high");
 		expectVisibleTasks(container, ["Fix login bug"]);
 	});
 
@@ -359,19 +329,12 @@ describe("Web board filters", () => {
 			availablePriorities: ["Very High", "High", "Medium", "Low", "Very Low"],
 		});
 
-		const prioritySelect = getSelectByFirstOption(container, "All priorities");
-		expect(Array.from(prioritySelect.options).map((option) => option.textContent)).toEqual([
-			"All priorities",
-			"Very High",
-			"High",
-			"Medium",
-			"Low",
-			"Very Low",
-		]);
+		await openFilter(container, "board-filter-priority");
+		expect(optionLabels(container, "board-filter-priority")).toEqual(["Very High", "High", "Medium", "Low", "Very Low"]);
 
-		await setSelectValue(prioritySelect, "very high");
+		await clickOption(container, "board-filter-priority", "Very High");
 		const text = container.textContent ?? "";
-		expect(new URLSearchParams(window.location.search).get("priority")).toBe("very high");
+		expect(searchParams().get("priority")).toBe("very high");
 		expect(text).toContain("Escalate production incident");
 		expect(text).toContain("Very High");
 		expect(text).not.toContain("Fix login bug");
@@ -388,15 +351,11 @@ describe("Web board filters", () => {
 			availableTypes: ["Bug", "Customer Request"],
 		});
 
-		await waitFor(() => new URLSearchParams(window.location.search).get("type") === "Customer Request");
+		await waitFor(() => searchParams().get("type") === "Customer Request");
 
-		const typeSelect = getSelectByFirstOption(container, "All types");
-		expect(Array.from(typeSelect.options).map((option) => option.textContent)).toEqual([
-			"All types",
-			"Bug",
-			"Customer Request",
-		]);
-		expect(typeSelect.value).toBe("Customer Request");
+		await openFilter(container, "board-filter-type");
+		expect(optionLabels(container, "board-filter-type")).toEqual(["No type", "Bug", "Customer Request"]);
+		expect(filterSummary(container, "board-filter-type")).toBe("Customer Request");
 		expect(container.textContent).toContain("Interview customers");
 		expect(container.textContent).not.toContain("Fix checkout");
 		expect(container.textContent).not.toContain("Unclassified follow-up");
@@ -407,10 +366,21 @@ describe("Web board filters", () => {
 			availableTypes: ["Bug", "Feature"],
 		});
 
-		await waitFor(() => new URLSearchParams(window.location.search).get("type") === null);
+		await waitFor(() => searchParams().get("type") === null);
 
-		expect(getSelectByFirstOption(container, "All types").value).toBe("");
+		expect(filterSummary(container, "board-filter-type")).toBe("All");
 		expectVisibleTasks(container, ["Fix login bug", "Write docs", "Improve board", "Triage unassigned issue"]);
+	});
+
+	it("keeps the supported values of a type list and drops the rest", async () => {
+		const container = renderBoardPage("http://localhost/board?type=bug,unsupported,-DOCS", {
+			availableTypes: ["Bug", "Docs", "Enhancement"],
+		});
+
+		await waitFor(() => searchParams().get("type") === "Bug,-Docs");
+
+		expect(filterSummary(container, "board-filter-type")).toBe("Bug +1");
+		expectVisibleTasks(container, ["Fix login bug"]);
 	});
 
 	it("canonicalizes mixed-case configured priority URL values", async () => {
@@ -427,9 +397,9 @@ describe("Web board filters", () => {
 			availablePriorities: ["Very High", "High", "Medium", "Low"],
 		});
 
-		await waitFor(() => new URLSearchParams(window.location.search).get("priority") === "very high");
+		await waitFor(() => searchParams().get("priority") === "very high");
 
-		expect(getSelectByFirstOption(container, "All priorities").value).toBe("very high");
+		expect(filterSummary(container, "board-filter-priority")).toBe("Very High");
 		expect(container.textContent).toContain("Escalate production incident");
 		expect(container.textContent).not.toContain("Fix login bug");
 	});
@@ -437,9 +407,9 @@ describe("Web board filters", () => {
 	it("clears unsupported priority URL values", async () => {
 		const container = renderBoardPage("http://localhost/board?priority=urgent");
 
-		await waitFor(() => new URLSearchParams(window.location.search).get("priority") === null);
+		await waitFor(() => searchParams().get("priority") === null);
 
-		expect(getSelectByFirstOption(container, "All priorities").value).toBe("");
+		expect(filterSummary(container, "board-filter-priority")).toBe("All");
 		expectVisibleTasks(container, ["Fix login bug", "Write docs", "Improve board", "Triage unassigned issue"]);
 	});
 
@@ -448,11 +418,10 @@ describe("Web board filters", () => {
 			availableLabels: ["Bug", "Docs", "enhancement"],
 		});
 
-		await clickElement(getBoardLabelsButton(container));
-		await toggleCheckbox(getBoardLabelCheckbox(container, "Bug"));
+		await clickOption(container, "board-filter-label", "Bug");
 
-		expect(new URLSearchParams(window.location.search).getAll("label")).toEqual(["Bug"]);
-		expect(getBoardLabelsButton(container).textContent).toContain("Bug");
+		expect(searchParams().get("label")).toBe("Bug");
+		expect(filterSummary(container, "board-filter-label")).toBe("Bug");
 		expectVisibleTasks(container, ["Fix login bug", "Triage unassigned issue"]);
 	});
 
@@ -461,26 +430,22 @@ describe("Web board filters", () => {
 			"http://localhost/board?assignee=alice&label=bug&priority=high&type=bug&view=compact",
 			{ availableTypes: ["Bug", "Feature"] },
 		);
-		await waitFor(() => new URLSearchParams(window.location.search).get("type") === "Bug");
+		await waitFor(() => searchParams().get("type") === "Bug");
 
-		expect(getSelectByFirstOption(container, "All assignees").value).toBe("alice");
-		expect(getBoardLabelsButton(container).textContent).toContain("bug");
-		expect(getSelectByFirstOption(container, "All priorities").value).toBe("high");
-		expect(getSelectByFirstOption(container, "All types").value).toBe("Bug");
+		expect(filterSummary(container, "board-filter-assignee")).toBe("alice");
+		expect(filterSummary(container, "board-filter-label")).toBe("bug");
+		expect(filterSummary(container, "board-filter-priority")).toBe("High");
+		expect(filterSummary(container, "board-filter-type")).toBe("Bug");
 		expectVisibleTasks(container, ["Fix login bug"]);
 
-		const clearButton = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Clear filters"),
-		);
-		expect(clearButton).toBeTruthy();
-		await clickElement(clearButton as HTMLButtonElement);
+		await clickElement(findButton(container, "Clear filters"));
 
-		const searchParams = new URLSearchParams(window.location.search);
-		expect(searchParams.get("assignee")).toBeNull();
-		expect(searchParams.getAll("label")).toEqual([]);
-		expect(searchParams.get("priority")).toBeNull();
-		expect(searchParams.get("type")).toBeNull();
-		expect(searchParams.get("view")).toBe("compact");
+		const params = searchParams();
+		expect(params.get("assignee")).toBeNull();
+		expect(params.get("label")).toBeNull();
+		expect(params.get("priority")).toBeNull();
+		expect(params.get("type")).toBeNull();
+		expect(params.get("view")).toBe("compact");
 		expectVisibleTasks(container, ["Fix login bug", "Write docs", "Improve board", "Triage unassigned issue"]);
 	});
 
@@ -490,7 +455,7 @@ describe("Web board filters", () => {
 		expect(container.textContent).toContain("m-1");
 		expect(container.textContent).toContain("m-2");
 
-		await setSelectValue(getSelectByFirstOption(container, "All assignees"), "alice");
+		await clickOption(container, "board-filter-assignee", "alice");
 
 		const text = container.textContent ?? "";
 		expect(text).toContain("Fix login bug");

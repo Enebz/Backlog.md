@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 import type { Task } from "../types/index.ts";
 import BoardPage from "../web/components/BoardPage.tsx";
 import { WebUserProvider } from "../web/contexts/WebUserContext";
+import { chipTexts, clickOption, excludeOption, filterSummary } from "./filter-menu-helpers.ts";
 
 const STATUSES = ["To Do", "Approved", "In Progress", "Waiting on you", "Done"];
 
@@ -125,11 +126,17 @@ describe("board decisions", () => {
 		expect(cardText("Work in progress")).toContain("@sugar-bounce");
 	});
 
-	it("filters by who asked, and keeps the filter in the address", () => {
+	it("filters by who asked, and keeps the filter in the address", async () => {
 		const { container } = renderBoard("http://localhost/board?from=the-house");
-		const select = container.querySelector("select[aria-label='Filter board by who asked']") as HTMLSelectElement;
-		expect(select.value).toBe("the-house");
-		const titles = Array.from(container.querySelectorAll("[role='button'] h4")).map((title) => title.textContent);
-		expect(titles.sort()).toEqual(["Proposal asked back", "Question for the user"]);
+		expect(filterSummary(container, "board-filter-askedBy")).toBe("the-house");
+		const titles = () => Array.from(container.querySelectorAll("[role='button'] h4")).map((title) => title.textContent);
+		expect(titles().sort()).toEqual(["Proposal asked back", "Question for the user"]);
+
+		// Several people, and who asked nothing (the person's own cards) left out.
+		await clickOption(container, "board-filter-askedBy", "depot-worker");
+		await excludeOption(container, "board-filter-askedBy", "No one");
+		expect(window.location.search).toBe("?from=the-house,depot-worker,-__none");
+		expect(titles().sort()).toEqual(["Proposal asked back", "Proposal from depot", "Question for the user"]);
+		expect(chipTexts(container)).toEqual(["Asked by: the-house", "Asked by: depot-worker", "Asked by: Someone"]);
 	});
 });
