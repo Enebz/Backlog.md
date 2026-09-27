@@ -5,6 +5,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import type { Task } from "../types/index.ts";
 import TaskList from "../web/components/TaskList.tsx";
+import {
+	clickOption,
+	excludeOption,
+	filterSummary,
+	findButton,
+	openFilter,
+	optionLabels,
+} from "./filter-menu-helpers.ts";
 
 const createTask = (overrides: Partial<Task>): Task => ({
 	id: "task-1",
@@ -71,6 +79,7 @@ const renderTaskList = (
 		availableStatuses?: string[];
 		availableLabels?: string[];
 		availablePriorities?: string[];
+		availableTypes?: string[];
 	} = {},
 ): HTMLElement => {
 	setupDom();
@@ -89,6 +98,7 @@ const renderTaskList = (
 					availableLabels={renderedLabels}
 					availableMilestones={[]}
 					availablePriorities={options.availablePriorities}
+					availableTypes={options.availableTypes}
 					milestoneEntities={[]}
 					archivedMilestones={[]}
 					onEditTask={() => {}}
@@ -108,14 +118,6 @@ const clickElement = async (element: Element) => {
 	});
 };
 
-const getSelectByFirstOption = (container: HTMLElement, firstOptionText: string): HTMLSelectElement => {
-	const select = Array.from(container.querySelectorAll("select")).find(
-		(element) => element.options[0]?.textContent === firstOptionText,
-	);
-	expect(select).toBeTruthy();
-	return select as HTMLSelectElement;
-};
-
 const waitFor = async (predicate: () => boolean) => {
 	for (let attempt = 0; attempt < 10; attempt += 1) {
 		if (predicate()) {
@@ -127,41 +129,24 @@ const waitFor = async (predicate: () => boolean) => {
 	}
 };
 
+const STATUS = "task-list-filter-status";
+const LABELS = "task-list-filter-label";
+
 const getLabelsButton = (container: HTMLElement): HTMLButtonElement => {
-	const button = container.querySelector("button[aria-controls='task-list-labels-menu']");
+	const button = container.querySelector(`button[aria-controls='${LABELS}-menu']`);
 	expect(button).toBeTruthy();
 	return button as HTMLButtonElement;
 };
 
-const getStatusButton = (container: HTMLElement): HTMLButtonElement => {
-	const button = container.querySelector("button[aria-controls='task-list-status-menu']");
-	expect(button).toBeTruthy();
-	return button as HTMLButtonElement;
+/** Filtering is done in the browser: any request the list makes is recorded, so a test can say there was none. */
+const recordFetches = (): string[] => {
+	const calls: string[] = [];
+	globalThis.fetch = (async (input: RequestInfo | URL) => {
+		calls.push(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+		return { ok: true, status: 200, statusText: "OK", json: async () => [] } as Response;
+	}) as typeof fetch;
+	return calls;
 };
-
-const getExcludeStatusButton = (container: HTMLElement): HTMLButtonElement => {
-	const button = container.querySelector("button[aria-controls='task-list-exclude-status-menu']");
-	expect(button).toBeTruthy();
-	return button as HTMLButtonElement;
-};
-
-const selectStatus = async (container: HTMLElement, status: string) => {
-	const menu = container.querySelector("#task-list-status-menu");
-	if (!menu) {
-		await clickElement(getStatusButton(container));
-	}
-	const statusLabel = Array.from(container.querySelectorAll("#task-list-status-menu label")).find(
-		(label) => label.textContent?.trim() === status,
-	);
-	const checkbox = statusLabel?.querySelector("input");
-	expect(checkbox).toBeTruthy();
-	await clickElement(checkbox as HTMLInputElement);
-};
-
-const getLabelOptions = (container: HTMLElement): string[] =>
-	Array.from(container.querySelectorAll("#task-list-labels-menu label span")).map(
-		(element) => element.textContent?.trim() ?? "",
-	);
 
 const getZIndexClass = (element: Element): number | null => {
 	const match = element.className.match(/\bz-(\d+)\b/);
@@ -185,7 +170,7 @@ afterEach(() => {
 	}
 });
 
-describe("TaskList labels filter menu", () => {
+describe("TaskList filters", () => {
 	it("does not render a duplicate local task search input", () => {
 		const container = renderTaskList(["/?query=docs"]);
 
@@ -201,9 +186,9 @@ describe("TaskList labels filter menu", () => {
 			],
 		});
 
-		await clickElement(getLabelsButton(container));
+		await openFilter(container, LABELS);
 
-		expect(getLabelOptions(container)).toEqual(["Alpha", "beta", "delta", "zeta"]);
+		expect(optionLabels(container, LABELS)).toEqual(["Alpha", "beta", "delta", "zeta"]);
 	});
 
 	it("sorts dotted subtask IDs under their parent when sorting by ID", async () => {
@@ -291,7 +276,7 @@ describe("TaskList labels filter menu", () => {
 
 		await clickElement(labelsButton);
 
-		const labelsMenu = container.querySelector("#task-list-labels-menu");
+		const labelsMenu = container.querySelector(`#${LABELS}-menu`);
 		const stickyHeader = container.querySelector("div.sticky");
 
 		expect(labelsMenu).toBeTruthy();
@@ -303,130 +288,77 @@ describe("TaskList labels filter menu", () => {
 	});
 
 	it("allows selecting and clearing a label filter", async () => {
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			expect(url).toContain("/api/search");
-			expect(url).toContain("label=bug");
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [{ type: "task", score: 0, task: tasks[0] }],
-			} as Response;
-		}) as typeof fetch;
-
+		const fetchCalls = recordFetches();
 		const container = renderTaskList(["/?label=bug"]);
-		const labelsButton = getLabelsButton(container);
-		await waitFor(() => fetchCalls.length === 1);
 
-		expect(labelsButton.textContent).toContain("bug");
-		expect(fetchCalls).toHaveLength(1);
+		expect(filterSummary(container, LABELS)).toBe("bug");
+		expect(getRenderedTaskIds(container)).toEqual(["task-101"]);
 
-		await clickElement(labelsButton);
+		await openFilter(container, LABELS);
+		await clickElement(findButton(container, "Clear"));
 
-		const clearButton = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Clear label filter"),
-		);
-		expect(clearButton).toBeTruthy();
-		await clickElement(clearButton as HTMLButtonElement);
-
-		expect(labelsButton.textContent).toContain("All");
-		expect(container.querySelector("#task-list-labels-menu")).toBeNull();
+		expect(filterSummary(container, LABELS)).toBe("All");
+		expect(container.querySelector(`#${LABELS}-menu`)).toBeNull();
+		expect(getRenderedTaskIds(container)).toEqual(["task-102", "task-101"]);
+		expect(fetchCalls).toEqual([]);
 	});
 
-	it("preserves legacy single-status URLs and sends one search status", async () => {
+	it("keeps legacy single-status URLs working, filtering in the browser", async () => {
+		const fetchCalls = recordFetches();
 		const progressTask = createTask({ id: "task-201", title: "Progress task", status: "In Progress" });
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [{ type: "task", score: 0, task: progressTask }],
-			} as Response;
-		}) as typeof fetch;
-
 		const container = renderTaskList(["/?status=In%20Progress"], {
 			tasks: [progressTask, createTask({ id: "task-202", title: "Todo task", status: "To Do" })],
 			availableStatuses: ["To Do", "In Progress", "Done"],
 		});
-		await waitFor(() => fetchCalls.length === 1 && getRenderedTaskIds(container).join(",") === "task-201");
 
-		expect(new URL(fetchCalls[0] ?? "", "http://localhost").searchParams.getAll("status")).toEqual([
-			"In Progress",
-		]);
-		expect(new URLSearchParams(getLocationSearch(container)).getAll("status")).toEqual(["In Progress"]);
-		expect(getStatusButton(container).textContent).toContain("In Progress");
+		expect(getRenderedTaskIds(container)).toEqual(["task-201"]);
+		expect(new URLSearchParams(getLocationSearch(container)).get("status")).toBe("In Progress");
+		expect(filterSummary(container, STATUS)).toBe("In Progress");
+		expect(fetchCalls).toEqual([]);
 	});
 
-	it("selects multiple statuses and persists each status in search and URL state", async () => {
+	it("selects multiple statuses and keeps them in the URL as one list", async () => {
 		const filteredTasks = [
 			createTask({ id: "task-101", title: "Todo visible", status: "To Do" }),
 			createTask({ id: "task-102", title: "Progress visible", status: "In Progress" }),
 			createTask({ id: "task-103", title: "Done hidden", status: "Done" }),
 		];
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			const statuses = new URL(url, "http://localhost").searchParams.getAll("status");
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () =>
-					filteredTasks
-						.filter((task) => statuses.includes(task.status))
-						.map((task) => ({ type: "task", score: 0, task })),
-			} as Response;
-		}) as typeof fetch;
-
 		const container = renderTaskList(undefined, {
 			tasks: filteredTasks,
 			availableStatuses: ["To Do", "In Progress", "Done"],
 		});
 
-		await selectStatus(container, "To Do");
-		await selectStatus(container, "In Progress");
-		await waitFor(() => getRenderedTaskIds(container).join(",") === "task-102,task-101");
+		await clickOption(container, STATUS, "To Do");
+		await clickOption(container, STATUS, "In Progress");
 
-		const latestSearch = new URL(fetchCalls.at(-1) ?? "", "http://localhost").searchParams;
-		expect(latestSearch.getAll("status")).toEqual(["To Do", "In Progress"]);
-		expect(new URLSearchParams(getLocationSearch(container)).getAll("status")).toEqual(["To Do", "In Progress"]);
-		expect(getStatusButton(container).textContent).toContain("2 selected");
+		expect(getRenderedTaskIds(container)).toEqual(["task-102", "task-101"]);
+		expect(getLocationSearch(container)).toBe("?status=To%20Do,In%20Progress");
+		expect(filterSummary(container, STATUS)).toBe("To Do +1");
 		expect(container.textContent).not.toContain("Done hidden");
 	});
 
-	it("canonicalizes case-insensitive status deep links before toggling them", async () => {
+	it("canonicalizes case-insensitive status deep links, then excludes and clears on further clicks", async () => {
 		const doneTask = createTask({ id: "task-101", title: "Done task", status: "Done" });
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [{ type: "task", score: 0, task: doneTask }],
-			} as Response;
-		}) as typeof fetch;
-
+		const todoTask = createTask({ id: "task-102", title: "Todo task", status: "To Do" });
 		const container = renderTaskList(["/?status=done&status=DONE"], {
-			tasks: [doneTask],
+			tasks: [doneTask, todoTask],
 			availableStatuses: ["To Do", "In Progress", "Done"],
 		});
-		await waitFor(() => fetchCalls.length === 1 && getRenderedTaskIds(container).join(",") === "task-101");
+		await waitFor(() => getLocationSearch(container) === "?status=Done");
 
-		expect(new URL(fetchCalls[0] ?? "", "http://localhost").searchParams.getAll("status")).toEqual(["Done"]);
-		expect(getStatusButton(container).textContent).toContain("Done");
+		expect(getLocationSearch(container)).toBe("?status=Done");
+		expect(filterSummary(container, STATUS)).toBe("Done");
+		expect(getRenderedTaskIds(container)).toEqual(["task-101"]);
 
-		await selectStatus(container, "Done");
-		await waitFor(() => getStatusButton(container).textContent?.includes("All") === true);
-		expect(new URLSearchParams(getLocationSearch(container)).getAll("status")).toEqual([]);
+		await clickOption(container, STATUS, "Done");
+		expect(getLocationSearch(container)).toBe("?status=-Done");
+		expect(filterSummary(container, STATUS)).toBe("not Done");
+		expect(getRenderedTaskIds(container)).toEqual(["task-102"]);
+
+		await clickOption(container, STATUS, "Done");
+		expect(filterSummary(container, STATUS)).toBe("All");
+		expect(getLocationSearch(container)).toBe("");
+		expect(getRenderedTaskIds(container)).toEqual(["task-102", "task-101"]);
 	});
 
 	it("clears all selected statuses and restores the unfiltered task list", async () => {
@@ -435,199 +367,125 @@ describe("TaskList labels filter menu", () => {
 			createTask({ id: "task-102", title: "Progress task", status: "In Progress" }),
 			createTask({ id: "task-103", title: "Done task", status: "Done" }),
 		];
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [
-					{ type: "task", score: 0, task: filteredTasks[1] },
-					{ type: "task", score: 0, task: filteredTasks[0] },
-				],
-			} as Response;
-		}) as typeof fetch;
-
 		const container = renderTaskList(["/?status=To%20Do&status=In%20Progress"], {
 			tasks: filteredTasks,
 			availableStatuses: ["To Do", "In Progress", "Done"],
 		});
-		await waitFor(() => fetchCalls.length === 1 && getRenderedTaskIds(container).length === 2);
+		expect(getRenderedTaskIds(container)).toEqual(["task-102", "task-101"]);
 
-		const clearFiltersButton = Array.from(container.querySelectorAll("button")).find(
-			(button) => button.textContent?.trim() === "Clear filters",
-		);
-		expect(clearFiltersButton).toBeTruthy();
-		await clickElement(clearFiltersButton as HTMLButtonElement);
-		await waitFor(() => getRenderedTaskIds(container).length === 3);
+		await clickElement(findButton(container, "Clear filters"));
 
-		expect(new URLSearchParams(getLocationSearch(container)).getAll("status")).toEqual([]);
-		expect(getStatusButton(container).textContent).toContain("All");
+		expect(new URLSearchParams(getLocationSearch(container)).get("status")).toBeNull();
+		expect(filterSummary(container, STATUS)).toBe("All");
 		expect(getRenderedTaskIds(container)).toEqual(["task-103", "task-102", "task-101"]);
-		expect(fetchCalls).toHaveLength(1);
 	});
 
-	it("persists excluded statuses and sends them to task search", async () => {
+	it("excludes statuses, and reads the old excludeStatus addresses as exclusions", async () => {
 		const filteredTasks = [
 			createTask({ id: "task-101", title: "Todo visible", status: "To Do" }),
 			createTask({ id: "task-102", title: "Progress visible", status: "In Progress" }),
 			createTask({ id: "task-103", title: "Done hidden", status: "Done" }),
 		];
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			const searchParams = new URL(url, "http://localhost").searchParams;
-			expect(url).toContain("/api/search");
-			expect(searchParams.getAll("excludeStatus")).toEqual(["Done"]);
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [
-					{ type: "task", score: 0, task: filteredTasks[1] },
-					{ type: "task", score: 0, task: filteredTasks[0] },
-				],
-			} as Response;
-		}) as typeof fetch;
-
 		const container = renderTaskList(undefined, {
 			tasks: filteredTasks,
 			availableStatuses: ["To Do", "In Progress", "Done"],
 		});
-		const excludeStatusButton = getExcludeStatusButton(container);
 
-		await clickElement(excludeStatusButton);
-		const doneLabel = Array.from(container.querySelectorAll("#task-list-exclude-status-menu label")).find((label) =>
-			label.textContent?.includes("Done"),
-		);
-		const doneCheckbox = doneLabel?.querySelector("input");
-		expect(doneCheckbox).toBeTruthy();
-		await clickElement(doneCheckbox as HTMLInputElement);
-		await waitFor(() => fetchCalls.length === 1 && getRenderedTaskIds(container).includes("task-102"));
+		await excludeOption(container, STATUS, "Done");
 
-		expect(excludeStatusButton.textContent).toContain("Done");
-		const locationSearch = container.querySelector("[data-testid='location-search']")?.textContent ?? "";
-		expect(new URLSearchParams(locationSearch).getAll("excludeStatus")).toEqual(["Done"]);
+		expect(filterSummary(container, STATUS)).toBe("not Done");
+		expect(getLocationSearch(container)).toBe("?status=-Done");
 		expect(getRenderedTaskIds(container)).toEqual(["task-102", "task-101"]);
 		expect(container.textContent).not.toContain("Done hidden");
+
+		act(() => {
+			activeRoot?.unmount();
+		});
+		const legacy = renderTaskList(["/?excludeStatus=Done&excludeStatuses=In%20Progress"], {
+			tasks: filteredTasks,
+			availableStatuses: ["To Do", "In Progress", "Done"],
+		});
+		await waitFor(() => getLocationSearch(legacy) === "?status=-Done,-In%20Progress");
+		expect(getLocationSearch(legacy)).toBe("?status=-Done,-In%20Progress");
+		expect(getRenderedTaskIds(legacy)).toEqual(["task-101"]);
 	});
 
-	it("uses default statuses for the exclude menu when no statuses are provided", async () => {
+	it("uses default statuses for the status menu when no statuses are provided", async () => {
 		const container = renderTaskList(undefined, { availableStatuses: [] });
-		const excludeStatusButton = getExcludeStatusButton(container);
 
-		await clickElement(excludeStatusButton);
+		await openFilter(container, STATUS);
 
-		const menu = container.querySelector("#task-list-exclude-status-menu");
-		expect(menu).toBeTruthy();
-		expect(menu?.textContent).toContain("To Do");
-		expect(menu?.textContent).toContain("In Progress");
-		expect(menu?.textContent).toContain("Done");
-		expect(menu?.textContent).not.toContain("No statuses");
+		expect(optionLabels(container, STATUS)).toEqual(["To Do", "In Progress", "Done"]);
+		expect(container.querySelector(`#${STATUS}-menu`)?.textContent).not.toContain("No statuses");
 	});
 
 	it("canonicalizes mixed-case configured priority URL values", async () => {
 		const customTask = createTask({ id: "task-301", title: "Escalate incident", priority: "very high" });
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [{ type: "task", score: 0, task: customTask }],
-			} as Response;
-		}) as typeof fetch;
-
 		const container = renderTaskList(["/?priority=VeRy%20HiGh"], {
-			tasks: [],
+			tasks: [customTask, createTask({ id: "task-302", title: "Routine chore", priority: "low" })],
 			availablePriorities: ["Very High", "High", "Medium", "Low"],
 		});
-		await waitFor(() =>
-			fetchCalls.length === 1 &&
-			new URLSearchParams(getLocationSearch(container)).get("priority") === "very high" &&
-			(container.textContent ?? "").includes("Escalate incident"),
-		);
+		await waitFor(() => new URLSearchParams(getLocationSearch(container)).get("priority") === "very high");
 
-		expect(new URL(fetchCalls[0] ?? "", "http://localhost").searchParams.get("priority")).toBe("very high");
-		expect(getSelectByFirstOption(container, "All priorities").value).toBe("very high");
-		expect(container.textContent).toContain("Escalate incident");
+		expect(new URLSearchParams(getLocationSearch(container)).get("priority")).toBe("very high");
+		expect(filterSummary(container, "task-list-filter-priority")).toBe("Very High");
+		expect(getRenderedTaskIds(container)).toEqual(["task-301"]);
 	});
 
-	it("clears unsupported priority URL values without searching", async () => {
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [],
-			} as Response;
-		}) as typeof fetch;
-
+	it("clears unsupported priority URL values", async () => {
+		const fetchCalls = recordFetches();
 		const container = renderTaskList(["/?priority=urgent"]);
 		await waitFor(() => new URLSearchParams(getLocationSearch(container)).get("priority") === null);
 
 		expect(fetchCalls).toEqual([]);
-		expect(getSelectByFirstOption(container, "All priorities").value).toBe("");
+		expect(filterSummary(container, "task-list-filter-priority")).toBe("All");
 		expect(getRenderedTaskIds(container)).toEqual(["task-102", "task-101"]);
+	});
+
+	it("filters by type, who asked and blocked, as the board does", async () => {
+		const container = renderTaskList(undefined, {
+			tasks: [
+				createTask({ id: "task-1", type: "bug", labels: ["from:the-house"] }),
+				createTask({ id: "task-2", type: "feature", labels: ["from:depot-worker", "blocked"] }),
+				createTask({ id: "task-3", type: "chore" }),
+			],
+			availableTypes: ["bug", "feature", "chore"],
+		});
+
+		await clickOption(container, "task-list-filter-type", "bug");
+		await clickOption(container, "task-list-filter-type", "feature");
+		expect(getRenderedTaskIds(container)).toEqual(["task-2", "task-1"]);
+
+		await excludeOption(container, "task-list-filter-askedBy", "the-house");
+		expect(getRenderedTaskIds(container)).toEqual(["task-2"]);
+
+		const hideBlocked = container.querySelector("[data-filter-option='blocked'] button[aria-pressed]");
+		await clickElement(hideBlocked as HTMLButtonElement);
+		expect(getRenderedTaskIds(container)).toEqual([]);
+		expect(getLocationSearch(container)).toBe("?type=bug,feature&from=-the-house&blocked=0");
+		expect(container.textContent).toContain("No tasks match the current filters");
 	});
 
 	it("shows cleanup when filtering by the final configured status", async () => {
 		const closedTask = createTask({ id: "task-201", title: "Closed task", status: "Closed" });
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			expect(url).toContain("/api/search");
-			expect(url).toContain("status=Closed");
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [{ type: "task", score: 0, task: closedTask }],
-			} as Response;
-		}) as typeof fetch;
-
 		const container = renderTaskList(undefined, {
 			tasks: [closedTask],
 			availableStatuses: ["To Do", "Review", "Closed"],
 		});
-		await selectStatus(container, "Closed");
-		await waitFor(() => fetchCalls.length === 1 && (container.textContent ?? "").includes("Clean Up"));
+		await clickOption(container, STATUS, "Closed");
 
 		expect(container.textContent).toContain("Clean Up");
 	});
 
 	it("does not show cleanup when filtering by a non-terminal status", async () => {
 		const reviewTask = createTask({ id: "task-202", title: "Review task", status: "Review" });
-		const fetchCalls: string[] = [];
-		globalThis.fetch = (async (input: RequestInfo | URL) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			fetchCalls.push(url);
-			expect(url).toContain("/api/search");
-			expect(url).toContain("status=Review");
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				json: async () => [{ type: "task", score: 0, task: reviewTask }],
-			} as Response;
-		}) as typeof fetch;
-
 		const container = renderTaskList(undefined, {
 			tasks: [reviewTask],
 			availableStatuses: ["To Do", "Review", "Closed"],
 		});
-		await selectStatus(container, "Review");
-		await waitFor(() => fetchCalls.length === 1 && (container.textContent ?? "").includes("Review task"));
+		await clickOption(container, STATUS, "Review");
 
+		expect(container.textContent).toContain("Review task");
 		expect(container.textContent).not.toContain("Clean Up");
 	});
 });

@@ -1,33 +1,31 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { apiClient } from "../lib/api";
-import type {
-	Milestone,
-	Task,
-	TaskSearchResult,
-} from "../../types";
+import type { Milestone, Task } from "../../types";
 import { DEFAULT_STATUSES } from "../../constants/index.ts";
-import { collectAvailableLabels } from "../../utils/label-filter.ts";
 import { compareTaskIds, compareTaskIdsDescending } from "../../utils/task-sorting.ts";
 import { isTerminalStatus } from "../../utils/terminal-status.ts";
 import { collectArchivedMilestoneKeys, getMilestoneLabel, milestoneKey } from "../utils/milestones";
 import { parseStoredUtcDate } from "../utils/date-display";
-import {
-	formatPriorityLabel,
-	getPriorityOptions,
-	getPriorityRank,
-	resolvePriorityValue,
-} from "../../utils/priority-config.ts";
+import { formatPriorityLabel, getPriorityRank, resolvePriorityValue } from "../../utils/priority-config.ts";
+import { getProjectValues, resolveProjectValue } from "../../utils/project-config.ts";
+import { getTaskTypeValues, resolveTaskTypeValue } from "../../utils/task-type-config.ts";
 import CleanupModal from "./CleanupModal";
 import StoredDate from "./StoredDate";
 import AcceptanceCriteriaProgress from "./AcceptanceCriteriaProgress";
-import LabelFilterDropdown from "./LabelFilterDropdown";
+import FilterBar from "./FilterBar";
 import { SuccessToast } from "./SuccessToast";
 import PersonAvatar from "./PersonAvatar";
 import { useWebUserName } from "../contexts/WebUserContext";
 import { askedBy, displayPerson, getWorkflow, topicLabels } from "../utils/workflow";
 import { describeBlocked, getBlockedStates, isBlockedLabel } from "../utils/blocked";
 import BlockedPill from "./BlockedPill";
+import { useTaskFilterDefinitions } from "./taskFilterDefinitions";
+import { useUrlFilters } from "../hooks/useUrlFilters";
+import {
+	applyFilters,
+	type FilterContext,
+	type FilterKey,
+	hasActiveFilters as anyFilterActive,
+} from "../utils/filters";
 
 interface TaskListProps {
 	onEditTask: (task: Task) => void;
@@ -37,6 +35,8 @@ interface TaskListProps {
 	availableLabels: string[];
 	availableMilestones: string[];
 	availablePriorities?: string[];
+	availableTypes?: string[];
+	availableProjects?: string[];
 	milestoneEntities: Milestone[];
 	archivedMilestones: Milestone[];
 	onRefreshData?: () => Promise<void>;
@@ -68,38 +68,18 @@ function sortTasksByIdDescending(list: Task[]): Task[] {
 	return [...list].sort((a, b) => compareTaskIdsDescending(a.id, b.id));
 }
 
-function getStatusFilters(searchParams: URLSearchParams): string[] {
-	return searchParams
-		.getAll("status")
-		.map((status) => status.trim())
-		.filter((status) => status.length > 0);
-}
-
-function normalizeStatusFilters(statuses: string[], availableStatuses: string[]): string[] {
-	const canonicalStatuses = new Map(
-		availableStatuses
-			.map((status) => status.trim())
-			.filter((status) => status.length > 0)
-			.map((status) => [status.toLowerCase(), status] as const),
-	);
-	const seen = new Set<string>();
-
-	return statuses.reduce<string[]>((normalized, status) => {
-		const trimmed = status.trim();
-		if (!trimmed) return normalized;
-		const canonical = canonicalStatuses.get(trimmed.toLowerCase()) ?? trimmed;
-		const key = canonical.toLowerCase();
-		if (!seen.has(key)) {
-			seen.add(key);
-			normalized.push(canonical);
-		}
-		return normalized;
-	}, []);
-}
-
-function areEqualStringArrays(left: string[], right: string[]): boolean {
-	return left.length === right.length && left.every((value, index) => value === right[index]);
-}
+/** The filters the task list offers, in the order it shows them. */
+export const TASK_LIST_FILTER_KEYS: readonly FilterKey[] = [
+	"status",
+	"assignee",
+	"askedBy",
+	"label",
+	"type",
+	"project",
+	"priority",
+	"milestone",
+	"blocked",
+];
 
 const TaskList: React.FC<TaskListProps> = ({
 	onEditTask,
@@ -109,66 +89,46 @@ const TaskList: React.FC<TaskListProps> = ({
 	availableLabels,
 	availableMilestones,
 	availablePriorities,
+	availableTypes,
+	availableProjects,
 	milestoneEntities,
 	archivedMilestones,
 	onRefreshData,
 	dateFormat,
 	isLoading = false,
 }) => {
-	const [searchParams, setSearchParams] = useSearchParams();
 	const statusOptions = useMemo(
 		() => (availableStatuses.length > 0 ? availableStatuses : [...DEFAULT_STATUSES]),
 		[availableStatuses],
 	);
-	const [statusFilter, setStatusFilter] = useState<string[]>(() =>
-		normalizeStatusFilters(getStatusFilters(searchParams), statusOptions),
-	);
-	const initialExcludeStatusParams = useMemo(() => {
-		const statuses = [...searchParams.getAll("excludeStatus")];
-		const statusesCsv = searchParams.get("excludeStatuses");
-		if (statusesCsv) statuses.push(...statusesCsv.split(","));
-		return statuses.map((status) => status.trim()).filter((status) => status.length > 0);
-	}, []);
-	const [excludedStatusFilter, setExcludedStatusFilter] = useState<string[]>(initialExcludeStatusParams);
-	const [priorityFilter, setPriorityFilter] = useState<string>(() =>
-		isLoading ? "" : (resolvePriorityValue(searchParams.get("priority"), availablePriorities) ?? ""),
-	);
-	const [milestoneFilter, setMilestoneFilter] = useState(() => searchParams.get("milestone") ?? "");
-	const initialLabelParams = useMemo(() => {
-		const labels = [...searchParams.getAll("label"), ...searchParams.getAll("labels")];
-		const labelsCsv = searchParams.get("labels");
-		if (labelsCsv) labels.push(...labelsCsv.split(","));
-		return labels.map((label) => label.trim()).filter((label) => label.length > 0);
-	}, []);
-	const [labelFilter, setLabelFilter] = useState<string[]>(initialLabelParams);
-	const [assigneeFilter, setAssigneeFilter] = useState(() => searchParams.get("assignee") ?? "");
+	const typeOptions = useMemo(() => getTaskTypeValues(availableTypes), [availableTypes]);
+	const projectOptions = useMemo(() => getProjectValues(availableProjects), [availableProjects]);
+	// Values are canonical once the configuration is loaded; a type, priority or project it does not
+	// know is dropped, and a status takes its configured spelling.
+	const canonicalFilterValues = useMemo(() => {
+		const statusesByKey = new Map(statusOptions.map((status) => [status.trim().toLowerCase(), status] as const));
+		return {
+			status: (value: string) => statusesByKey.get(value.trim().toLowerCase()) ?? value.trim(),
+			type: (value: string) => resolveTaskTypeValue(value, availableTypes),
+			priority: (value: string) => resolvePriorityValue(value, availablePriorities),
+			project: (value: string) => resolveProjectValue(value, availableProjects),
+		};
+	}, [statusOptions, availableTypes, availablePriorities, availableProjects]);
+	const { filters, setFilters } = useUrlFilters(TASK_LIST_FILTER_KEYS, canonicalFilterValues, !isLoading);
 	const webUserName = useWebUserName();
 	const workflow = useMemo(() => getWorkflow(statusOptions), [statusOptions]);
 	// Read against every loaded task, so a search or filter never hides the card that blocks a row.
 	const blockedStates = useMemo(() => getBlockedStates(tasks, statusOptions), [tasks, statusOptions]);
-	const assigneeOptions = useMemo(() => {
-		const seen = new Set<string>();
-		for (const task of tasks) {
-			for (const assignee of task.assignee) {
-				if (assignee.trim()) seen.add(assignee.trim());
-			}
-		}
-		return Array.from(seen).sort((a, b) => a.localeCompare(b));
-	}, [tasks]);
-	const [displayTasks, setDisplayTasks] = useState<Task[]>(() => sortTasksByIdDescending(tasks));
-	const [error, setError] = useState<string | null>(null);
 	const [showCleanupModal, setShowCleanupModal] = useState(false);
 	const [cleanupSuccessMessage, setCleanupSuccessMessage] = useState<string | null>(null);
 	const [sortColumn, setSortColumn] = useState<TaskSortColumn>("id");
 	const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
-	const priorityOptions = useMemo(
-		() => [{ label: "All priorities", value: "" }, ...getPriorityOptions(availablePriorities)],
-		[availablePriorities],
-	);
 	const tableHeaderScrollRef = useRef<HTMLDivElement | null>(null);
 	const tableBodyScrollRef = useRef<HTMLDivElement | null>(null);
 	const isSyncingTableScrollRef = useRef(false);
-	const isFilteringTerminalStatus = statusFilter.some((status) => isTerminalStatus(status, statusOptions));
+	const isFilteringTerminalStatus = (filters.status?.include ?? []).some((status) =>
+		isTerminalStatus(status, statusOptions),
+	);
 	const milestoneAliasToCanonical = useMemo(() => {
 		const aliasMap = new Map<string, string>();
 		const collectIdAliasKeys = (value: string): string[] => {
@@ -303,246 +263,46 @@ const TaskList: React.FC<TaskListProps> = ({
 	};
 
 	const sortedBaseTasks = useMemo(() => sortTasksByIdDescending(tasks), [tasks]);
-	const mergedAvailableLabels = useMemo(
-		() => collectAvailableLabels(tasks, availableLabels),
-		[tasks, availableLabels],
-	);
-	const milestoneOptions = useMemo(() => {
-		const uniqueMilestones = Array.from(new Set([...availableMilestones.map((m) => m.trim()).filter(Boolean)]));
-		return uniqueMilestones;
-	}, [availableMilestones]);
-	const hasActiveFilters = Boolean(
-		statusFilter.length > 0 ||
-			excludedStatusFilter.length > 0 ||
-			priorityFilter ||
-			labelFilter.length > 0 ||
-			milestoneFilter ||
-			assigneeFilter,
-	);
+	const hasActiveFilters = anyFilterActive(filters, TASK_LIST_FILTER_KEYS);
 	const totalTasks = sortedBaseTasks.length;
 
-	useEffect(() => {
-		const paramStatuses = normalizeStatusFilters(getStatusFilters(searchParams), statusOptions);
-		const paramExcludedStatuses = [...searchParams.getAll("excludeStatus")];
-		const excludedStatusesCsv = searchParams.get("excludeStatuses");
-		if (excludedStatusesCsv) {
-			paramExcludedStatuses.push(...excludedStatusesCsv.split(","));
-		}
-		const normalizedExcludedStatuses = paramExcludedStatuses
-			.map((status) => status.trim())
-			.filter((status) => status.length > 0);
-		const rawParamPriority = searchParams.get("priority") ?? "";
-		const paramPriority = resolvePriorityValue(rawParamPriority, availablePriorities) ?? "";
-		const paramMilestone = searchParams.get("milestone") ?? "";
-		const paramAssignee = searchParams.get("assignee") ?? "";
-		const paramLabels = [...searchParams.getAll("label"), ...searchParams.getAll("labels")];
-		const labelsCsv = searchParams.get("labels");
-		if (labelsCsv) {
-			paramLabels.push(...labelsCsv.split(","));
-		}
-		const normalizedLabels = paramLabels.map((label) => label.trim()).filter((label) => label.length > 0);
-
-		if (!areEqualStringArrays(paramStatuses, statusFilter)) {
-			setStatusFilter(paramStatuses);
-		}
-		if (!areEqualStringArrays(normalizedExcludedStatuses, excludedStatusFilter)) {
-			setExcludedStatusFilter(normalizedExcludedStatuses);
-		}
-		if (!isLoading && rawParamPriority !== paramPriority) {
-			setSearchParams(
-				(params) => {
-					if (paramPriority) {
-						params.set("priority", paramPriority);
-					} else {
-						params.delete("priority");
-					}
-					return params;
-				},
-				{ replace: true },
-			);
-		}
-		if (!isLoading && paramPriority !== priorityFilter) {
-			setPriorityFilter(paramPriority);
-		}
-		if (paramMilestone !== milestoneFilter) {
-			setMilestoneFilter(paramMilestone);
-		}
-		if (paramAssignee !== assigneeFilter) {
-			setAssigneeFilter(paramAssignee);
-		}
-		if (!areEqualStringArrays(normalizedLabels, labelFilter)) {
-			setLabelFilter(normalizedLabels);
-		}
-	}, [availablePriorities, isLoading, searchParams, setSearchParams, statusOptions]);
-
-	useEffect(() => {
-		if (!hasActiveFilters) {
-			setDisplayTasks(sortedBaseTasks);
-			setError(null);
-		}
-	}, [hasActiveFilters, sortedBaseTasks]);
-
-	useEffect(() => {
-		const filterByMilestone = (list: Task[]): Task[] => {
-			const normalized = canonicalizeMilestone(milestoneFilter);
-			if (!normalized) return list;
-			return list.filter((task) => {
-				const canonicalTaskMilestone = canonicalizeMilestone(task.milestone);
-				const taskKey = milestoneKey(canonicalTaskMilestone);
-				const normalizedTaskMilestone = taskKey && archivedMilestoneKeys.has(taskKey) ? "" : canonicalTaskMilestone;
-				if (normalized === "__none") {
-					return !normalizedTaskMilestone;
-				}
-				return normalizedTaskMilestone === normalized;
-			});
-		};
-
-		const shouldUseApi =
-			statusFilter.length > 0 ||
-			excludedStatusFilter.length > 0 ||
-			Boolean(priorityFilter) ||
-			labelFilter.length > 0;
-
-		if (!hasActiveFilters) {
-			return;
-		}
-
-		let cancelled = false;
-		setError(null);
-
-		const fetchFilteredTasks = async () => {
-			// If only milestone filter is active, filter locally to avoid an extra request
-			if (!shouldUseApi) {
-				setDisplayTasks(filterByMilestone(sortedBaseTasks));
-				return;
-			}
-			try {
-				const results = await apiClient.search({
-					types: ["task"],
-					status: statusFilter.length > 0 ? statusFilter : undefined,
-					excludeStatus: excludedStatusFilter.length > 0 ? excludedStatusFilter : undefined,
-					priority: priorityFilter || undefined,
-					labels: labelFilter.length > 0 ? labelFilter : undefined,
-				});
-				if (cancelled) {
-					return;
-				}
-				const taskResults = results.filter((result): result is TaskSearchResult => result.type === "task");
-				const filtered = filterByMilestone(taskResults.map((result) => result.task));
-				setDisplayTasks(sortTasksByIdDescending(filtered));
-			} catch (err) {
-				console.error("Failed to apply task filters:", err);
-				if (!cancelled) {
-					setDisplayTasks([]);
-					setError("Unable to fetch tasks for the selected filters.");
-				}
-			}
-		};
-
-		fetchFilteredTasks();
-
-		return () => {
-			cancelled = true;
-		};
-	}, [
-		hasActiveFilters,
-		excludedStatusFilter,
-		priorityFilter,
-		statusFilter,
-		labelFilter,
+	const filterContext = useMemo<FilterContext>(
+		() => ({
+			// A task in an archived milestone counts as having none.
+			milestoneKey: (value) => {
+				const key = milestoneKey(canonicalizeMilestone(value));
+				return key && archivedMilestoneKeys.has(key) ? "" : key;
+			},
+			isBlocked: (task) => blockedStates.has(task.id),
+		}),
+		// canonicalizeMilestone reads only the alias map.
+		[milestoneAliasToCanonical, archivedMilestoneKeys, blockedStates],
+	);
+	const displayTasks = useMemo(
+		() => applyFilters(sortedBaseTasks, filters, filterContext),
+		[sortedBaseTasks, filters, filterContext],
+	);
+	const filterDefinitions = useTaskFilterDefinitions({
+		keys: TASK_LIST_FILTER_KEYS,
 		tasks,
-		milestoneFilter,
-		sortedBaseTasks,
-		milestoneAliasToCanonical,
-		archivedMilestoneKeys,
-	]);
-
-	const syncUrl = (
-		nextStatuses: string[],
-		nextExcludedStatuses: string[],
-		nextPriority: string,
-		nextLabels: string[],
-		nextMilestone: string,
-		nextAssignee: string = assigneeFilter,
-	) => {
-		const params = new URLSearchParams();
-		if (nextAssignee) {
-			params.set("assignee", nextAssignee);
-		}
-		for (const status of nextStatuses) {
-			if (status.trim()) {
-				params.append("status", status.trim());
-			}
-		}
-		for (const status of nextExcludedStatuses) {
-			if (status.trim()) {
-				params.append("excludeStatus", status.trim());
-			}
-		}
-		if (nextPriority) {
-			params.set("priority", nextPriority);
-		}
-		if (nextLabels.length > 0) {
-			for (const label of nextLabels) {
-				params.append("label", label);
-			}
-		}
-		if (nextMilestone) {
-			params.set("milestone", nextMilestone);
-		}
-		setSearchParams(params, { replace: true });
-	};
-
-	const handleStatusChange = (next: string[]) => {
-		const normalized = normalizeStatusFilters(next, statusOptions);
-		setStatusFilter(normalized);
-		syncUrl(normalized, excludedStatusFilter, priorityFilter, labelFilter, milestoneFilter);
-	};
-
-	const handleExcludeStatusChange = (next: string[]) => {
-		const normalized = next.map((status) => status.trim()).filter((status) => status.length > 0);
-		setExcludedStatusFilter(normalized);
-		syncUrl(statusFilter, normalized, priorityFilter, labelFilter, milestoneFilter);
-	};
-
-	const handlePriorityChange = (value: string) => {
-		setPriorityFilter(value);
-		syncUrl(statusFilter, excludedStatusFilter, value, labelFilter, milestoneFilter);
-	};
-
-	const handleLabelChange = (next: string[]) => {
-		const normalized = next.map((label) => label.trim()).filter((label) => label.length > 0);
-		setLabelFilter(normalized);
-		syncUrl(statusFilter, excludedStatusFilter, priorityFilter, normalized, milestoneFilter);
-	};
-
-	const handleMilestoneChange = (value: string) => {
-		setMilestoneFilter(value);
-		syncUrl(statusFilter, excludedStatusFilter, priorityFilter, labelFilter, value);
-	};
-
-	const handleAssigneeChange = (value: string) => {
-		setAssigneeFilter(value);
-		syncUrl(statusFilter, excludedStatusFilter, priorityFilter, labelFilter, milestoneFilter, value);
-	};
-
-	const handleClearFilters = () => {
-		setAssigneeFilter("");
-		setStatusFilter([]);
-		setExcludedStatusFilter([]);
-		setPriorityFilter("");
-		setLabelFilter([]);
-		setMilestoneFilter("");
-		syncUrl([], [], "", [], "", "");
-		setDisplayTasks(sortedBaseTasks);
-		setError(null);
-	};
+		filters,
+		context: filterContext,
+		webUserName,
+		availableLabels,
+		availablePriorities,
+		statusOptions,
+		typeOptions,
+		projectOptions,
+		milestoneEntities,
+		milestoneIds: availableMilestones,
+		blockedControl: "toggle",
+	});
 
 	const handleCleanupSuccess = async (movedCount: number) => {
 		setShowCleanupModal(false);
 		setCleanupSuccessMessage(`Successfully moved ${movedCount} task${movedCount !== 1 ? 's' : ''} to completed folder`);
 
-		// Refresh the data - existing effects will handle re-filtering automatically
+		// Refresh the data; the filters apply to whatever it loads.
 		if (onRefreshData) {
 			await onRefreshData();
 		}
@@ -643,13 +403,7 @@ const TaskList: React.FC<TaskListProps> = ({
 		const compareText = (a: string, b: string) => collator.compare(a, b);
 		const withDirection = (value: number) => (sortDirection === "asc" ? value : -value);
 
-		const matchesAssignee = (task: Task) =>
-			!assigneeFilter
-				? true
-				: assigneeFilter === "__unassigned__"
-					? task.assignee.every((assignee) => !assignee.trim())
-					: task.assignee.some((assignee) => assignee.trim() === assigneeFilter);
-		return displayTasks.filter(matchesAssignee).sort((a, b) => {
+		return [...displayTasks].sort((a, b) => {
 			let result = 0;
 			switch (sortColumn) {
 				case "id": {
@@ -709,7 +463,7 @@ const TaskList: React.FC<TaskListProps> = ({
 			if (sortColumn === "ordinal") return compareTaskIdsAscending(a, b);
 			return compareTaskIdsDescending(a.id, b.id);
 		});
-	}, [assigneeFilter, availablePriorities, displayTasks, milestoneEntities, sortColumn, sortDirection]);
+	}, [availablePriorities, displayTasks, milestoneEntities, sortColumn, sortDirection]);
 
 	const currentCount = sortedDisplayTasks.length;
 
@@ -751,118 +505,36 @@ const TaskList: React.FC<TaskListProps> = ({
 					</button>
 				</div>
 
-				<div className="flex flex-wrap items-center gap-3 justify-between">
-						<div className="flex flex-wrap items-center gap-3 flex-1 min-w-0">
-							<LabelFilterDropdown
-								availableLabels={statusOptions}
-								selectedLabels={statusFilter}
-								onChange={handleStatusChange}
-								menuId="task-list-status-menu"
-								label="Status"
-								emptyLabel="All"
-								noOptionsLabel="No statuses"
-								clearLabel="Clear status filter"
-								className="min-w-[180px]"
-							/>
-
-							<LabelFilterDropdown
-								availableLabels={statusOptions}
-								selectedLabels={excludedStatusFilter}
-								onChange={handleExcludeStatusChange}
-								menuId="task-list-exclude-status-menu"
-								label="Exclude status"
-								emptyLabel="None"
-							noOptionsLabel="No statuses"
-							clearLabel="Clear excluded statuses"
-							className="min-w-[210px]"
-						/>
-
-						<select
-							aria-label="Filter tasks by assignee"
-							value={assigneeFilter}
-							onChange={(event) => handleAssigneeChange(event.target.value)}
-							className="min-w-[150px] h-10 py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200"
-						>
-							<option value="">All assignees</option>
-							<option value="__unassigned__">Unassigned</option>
-							{assigneeOptions.map((assignee) => (
-								<option key={assignee} value={assignee}>
-									{displayPerson(assignee, webUserName) === "You" ? `You (${assignee})` : assignee}
-								</option>
-							))}
-						</select>
-
-						<select
-							value={priorityFilter}
-							onChange={(event) => handlePriorityChange(event.target.value)}
-							className="min-w-[120px] h-10 py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200"
-						>
-							{priorityOptions.map((option) => (
-								<option key={option.value || "all"} value={option.value}>
-									{option.label}
-								</option>
-							))}
-						</select>
-
-						<select
-							value={milestoneFilter}
-							onChange={(event) => handleMilestoneChange(event.target.value)}
-							className="min-w-[160px] h-10 py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200"
-						>
-							<option value="">All milestones</option>
-							<option value="__none">No milestone</option>
-							{milestoneOptions.map((milestone) => (
-								<option key={milestone} value={milestone}>
-									{getMilestoneLabel(milestone, milestoneEntities)}
-								</option>
-							))}
-						</select>
-
-						<LabelFilterDropdown
-							availableLabels={mergedAvailableLabels}
-							selectedLabels={labelFilter}
-							onChange={handleLabelChange}
-							menuId="task-list-labels-menu"
-						/>
-
-					</div>
-
-					<div className="flex items-center gap-3 flex-shrink-0">
-						{isFilteringTerminalStatus && currentCount > 0 && (
-								<button
-									type="button"
-									onClick={() => setShowCleanupModal(true)}
-									className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 flex items-center gap-2 whitespace-nowrap"
-									title="Clean up old completed tasks"
-								>
-									<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-								</svg>
-								Clean Up
-							</button>
-						)}
-
-							{hasActiveFilters && (
-								<button
-									type="button"
-									onClick={handleClearFilters}
-									className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg whitespace-nowrap transition-colors duration-200 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700"
-								>
-									Clear filters
-								</button>
-							)}
-
-						<div className="text-sm text-gray-600 dark:text-gray-300 whitespace-nowrap text-right min-w-[170px]">
-							Showing {currentCount} of {totalTasks} tasks
-						</div>
-					</div>
+				<div className="flex flex-wrap items-center gap-3">
+					<FilterBar
+						id="task-list-filter"
+						label="Task filters"
+						definitions={filterDefinitions}
+						filters={filters}
+						onChange={setFilters}
+						countNoun="tasks"
+						trailing={
+							<div className="flex items-center gap-3">
+								{isFilteringTerminalStatus && currentCount > 0 && (
+									<button
+										type="button"
+										onClick={() => setShowCleanupModal(true)}
+										className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 flex items-center gap-2 whitespace-nowrap"
+										title="Clean up old completed tasks"
+									>
+										<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+											<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+										</svg>
+										Clean Up
+									</button>
+								)}
+								<div className="text-sm text-gray-600 dark:text-gray-300 whitespace-nowrap text-right">
+									Showing {currentCount} of {totalTasks} tasks
+								</div>
+							</div>
+						}
+					/>
 				</div>
-
-				{error && (
-					<div className="rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-						{error}
-					</div>
-				)}
 			</div>
 
 			{currentCount === 0 ? (
