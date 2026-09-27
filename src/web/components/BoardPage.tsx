@@ -108,6 +108,11 @@ export default function BoardPage({
 
 	const handleFiltersChange = (filters: BoardFilters) => {
 		setSearchParams(params => {
+			if (filters.blocked) {
+				params.set('blocked', '1');
+			} else {
+				params.delete('blocked');
+			}
 			if (filters.askedBy) {
 				params.set('from', filters.askedBy);
 			} else {
@@ -147,6 +152,7 @@ export default function BoardPage({
 
 	const filterAssignee = searchParams.get('assignee') ?? '';
 	const filterAskedBy = searchParams.get('from') ?? '';
+	const filterBlocked = ['1', 'true'].includes(searchParams.get('blocked') ?? '');
 	const filterLabels = [
 		...searchParams.getAll('label'),
 		...searchParams.getAll('labels').flatMap((value) => value.split(',')),
@@ -223,6 +229,7 @@ export default function BoardPage({
 				filterProject={filterProject}
 				availableProjects={availableProjects}
 				filterAskedBy={filterAskedBy}
+				filterBlocked={filterBlocked}
 				onFiltersChange={handleFiltersChange}
 				hideEmptyColumns={hideEmptyColumns}
 				dateFormat={dateFormat}

@@ -8,7 +8,9 @@ import TaskTypeBadge from './TaskTypeBadge';
 import PersonAvatar from './PersonAvatar';
 import { useWebUserName } from '../contexts/WebUserContext';
 import { askedBy, displayPerson, hasUserReplied, topicLabels } from '../utils/workflow';
+import { type BlockedState, describeBlocked, isBlockedLabel } from '../utils/blocked';
 import { isSamePerson } from '../../utils/web-user';
+import BlockedPill from './BlockedPill';
 
 interface TaskCardProps {
   task: Task;
@@ -26,7 +28,15 @@ interface TaskCardProps {
   onSelect?: (event: { shiftKey: boolean }) => void;
   isSelectionDragging?: boolean;
   onSelectionDragChange?: (active: boolean) => void;
+  /** Why the card is blocked, when it is: a red pill and outline, the reason on hover and on focus. */
+  blocked?: BlockedState | null;
 }
+
+// A blocked card: a red left edge in place of the priority colour (its badge still shows it), inside a
+// faint red outline. Each side is set on its own so no colour utility can override another.
+const BLOCKED_CARD_CLASS =
+  'border-l-4 border-l-red-500 border-t-red-200 border-r-red-200 border-b-red-200 ' +
+  'dark:border-l-red-500 dark:border-t-red-900 dark:border-r-red-900 dark:border-b-red-900';
 
 // Dragging a selected card moves the whole selection, so the drag image has to show it. Stacking
 // empty cards (up to two) behind a copy of the dragged one, plus the count of every task that will
@@ -78,12 +88,14 @@ const TaskCard: React.FC<TaskCardProps> = ({
   onSelect,
   isSelectionDragging = false,
   onSelectionDragChange,
+  blocked = null,
 }) => {
   const [isDragging, setIsDragging] = React.useState(false);
   const [showBranchTooltip, setShowBranchTooltip] = React.useState(false);
   const webUserName = useWebUserName();
   const requesters = askedBy(task.labels);
-  const labels = topicLabels(task.labels);
+  // The pill says blocked, so the label that makes it is not repeated as a chip.
+  const labels = topicLabels(task.labels).filter((label) => !blocked || !isBlockedLabel(label));
   const commentCount = task.comments?.length ?? 0;
   const userReplied = hasUserReplied(task, webUserName);
   const assigneeIsRequester = Boolean(requesters[0]) && task.assignee.length === 1 && isSamePerson(task.assignee[0], requesters[0]);
@@ -91,9 +103,14 @@ const TaskCard: React.FC<TaskCardProps> = ({
   // Check if task is from another branch (read-only)
   const isFromOtherBranch = Boolean(task.branch);
   const acceptanceCriteriaProgress = getAcceptanceCriteriaProgressCounts(task);
-  const accessibleLabel = acceptanceCriteriaProgress
-    ? `Open ${task.id}: ${task.title}. Acceptance criteria progress: ${acceptanceCriteriaProgress.checked} of ${acceptanceCriteriaProgress.total}`
-    : `Open ${task.id}: ${task.title}`;
+  const blockedLines = blocked ? describeBlocked(blocked) : [];
+  const accessibleLabel = [
+    `Open ${task.id}: ${task.title}`,
+    ...blockedLines,
+    ...(acceptanceCriteriaProgress
+      ? [`Acceptance criteria progress: ${acceptanceCriteriaProgress.checked} of ${acceptanceCriteriaProgress.total}`]
+      : []),
+  ].join('. ');
 
   const handleDragStart = (e: React.DragEvent) => {
     // Prevent dragging cross-branch tasks
@@ -202,11 +219,15 @@ const TaskCard: React.FC<TaskCardProps> = ({
       )}
 
       <div
-        className={`bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-md p-3 mb-2 transition-all duration-200 ${
-          isFromOtherBranch 
-            ? 'opacity-75 cursor-not-allowed border-dashed' 
-            : 'cursor-pointer hover:shadow-md dark:hover:shadow-lg hover:border-stone-500 dark:hover:border-stone-400'
-        } ${getPriorityClass(task.priority)} ${
+        className={`group/card bg-white dark:bg-gray-700 border rounded-md p-3 mb-2 transition-all duration-200 ${
+          blocked ? BLOCKED_CARD_CLASS : `border-gray-200 dark:border-gray-600 ${getPriorityClass(task.priority)}`
+        } ${
+          isFromOtherBranch
+            ? 'opacity-75 cursor-not-allowed border-dashed'
+            : `cursor-pointer hover:shadow-md dark:hover:shadow-lg ${
+                blocked ? '' : 'hover:border-stone-500 dark:hover:border-stone-400'
+              }`
+        } ${
           isDragging || (isSelected && isSelectionDragging) ? 'opacity-50 transform rotate-2 scale-105' : ''
         } ${
           isSelected
@@ -214,6 +235,8 @@ const TaskCard: React.FC<TaskCardProps> = ({
             : ''
         }`}
         aria-selected={isSelected}
+        title={blockedLines.length > 0 ? blockedLines.join('\n') : undefined}
+        data-blocked={blocked ? 'true' : undefined}
         draggable={!isFromOtherBranch}
 		role="button"
 		tabIndex={0}
@@ -260,8 +283,9 @@ const TaskCard: React.FC<TaskCardProps> = ({
             <TaskTypeBadge type={task.type} availableTypes={availableTypes} className="min-w-0" />
             <ProjectBadge project={task.project} availableProjects={availableProjects} className="min-w-0" />
           </div>
-          {(acceptanceCriteriaProgress || priorityBadge) && (
+          {(acceptanceCriteriaProgress || priorityBadge || blocked) && (
             <div className="flex shrink-0 items-center gap-2">
+              {blocked && <BlockedPill />}
               <AcceptanceCriteriaProgress task={task} density="card" />
               {priorityBadge && (
                 <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${priorityBadge.bg} ${priorityBadge.text} transition-colors duration-200`}>
@@ -280,6 +304,19 @@ const TaskCard: React.FC<TaskCardProps> = ({
         }`}>
           {task.title}
         </h4>
+
+        {/* The reason for keyboard users, whom the tooltip never reaches */}
+        {blockedLines.length > 0 && (
+          <div
+            className="mt-1.5 hidden space-y-0.5 text-[11px] leading-snug text-red-700 group-focus-visible/card:block dark:text-red-300"
+            aria-hidden="true"
+            data-blocked-reason
+          >
+            {blockedLines.map((line) => (
+              <p key={line} className="line-clamp-3">{line}</p>
+            ))}
+          </div>
+        )}
 
         {/* Topic labels - limit to 3; from: labels are shown as who asked */}
         {labels.length > 0 && (

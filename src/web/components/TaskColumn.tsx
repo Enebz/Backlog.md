@@ -6,6 +6,7 @@ import { parseStoredUtcDate } from '../utils/date-display';
 import TaskCard from './TaskCard';
 import { useWebUserName } from '../contexts/WebUserContext';
 import { type DecisionKind, hasUserReplied } from '../utils/workflow';
+import type { BlockedState } from '../utils/blocked';
 
 interface TaskColumnProps {
   title: string;
@@ -33,6 +34,8 @@ interface TaskColumnProps {
   onSelectionDragChange?: (active: boolean) => void;
   /** Proposals or questions for the person at the board: the column stands out and offers a review. */
   decisionKind?: DecisionKind | null;
+  /** The blocked cards of the board, by ID. */
+  blockedStates?: ReadonlyMap<string, BlockedState>;
 }
 
 type CreatedDateSortDirection = 'asc' | 'desc';
@@ -88,6 +91,7 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
   isSelectionDragging,
   onSelectionDragChange,
   decisionKind = null,
+  blockedStates,
 }) => {
   const webUserName = useWebUserName();
   const [isDragOver, setIsDragOver] = React.useState(false);
@@ -422,6 +426,7 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
               availableTypes={availableTypes}
               availableProjects={availableProjects}
               dateFormat={dateFormat}
+              blocked={blockedStates?.get(task.id) ?? null}
             />
             
             {/* Drop indicator for after this task */}

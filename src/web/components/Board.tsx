@@ -16,6 +16,7 @@ import LabelFilterDropdown from './LabelFilterDropdown';
 import { SuccessToast } from './SuccessToast';
 import { useWebUserName } from '../contexts/WebUserContext';
 import { askedBy, decisionKindFor, displayPerson, getWorkflow, hasUserReplied, statusQueue } from '../utils/workflow';
+import { getBlockedStates } from '../utils/blocked';
 
 interface BoardProps {
   onEditTask: (task: Task) => void;
@@ -44,6 +45,7 @@ interface BoardProps {
   filterProject?: string;
   availableProjects?: string[];
   filterAskedBy?: string;
+  filterBlocked?: boolean;
   onFiltersChange?: (filters: BoardFilters) => void;
   hideEmptyColumns?: boolean;
   dateFormat?: string;
@@ -56,6 +58,8 @@ export interface BoardFilters {
   taskType: string;
   project: string;
   askedBy: string;
+  /** Only the blocked cards. */
+  blocked: boolean;
 }
 
 const BOARD_FILTER_SELECT_CLASS =
@@ -90,6 +94,7 @@ const Board: React.FC<BoardProps> = ({
   filterProject = '',
   availableProjects,
   filterAskedBy = '',
+  filterBlocked = false,
   onFiltersChange,
   hideEmptyColumns = false,
   dateFormat,
@@ -295,6 +300,7 @@ const Board: React.FC<BoardProps> = ({
   );
 
   const hasActiveFilters =
+    filterBlocked ||
     filterAskedBy !== '' ||
     filterAssignee !== '' ||
     normalizedFilterLabels.length > 0 ||
@@ -302,8 +308,11 @@ const Board: React.FC<BoardProps> = ({
     filterType !== '' ||
     filterProject !== '';
 
+  // Blocked is read against the whole board, so a filter never hides the dependency that blocks a card.
+  const blockedStates = useMemo(() => getBlockedStates(tasks, statuses), [tasks, statuses]);
+
   // Filter tasks by milestone when milestoneFilter is set, then apply assignee/label/priority filters
-  const filteredTasks = useMemo(() => {
+  const tasksMatchingFilters = useMemo(() => {
     let result = tasks;
     if (milestoneFilter) {
       result = result.filter(task => canonicalizeMilestone(task.milestone) === canonicalMilestoneFilter);
@@ -334,6 +343,13 @@ const Board: React.FC<BoardProps> = ({
     return result;
   }, [tasks, milestoneFilter, canonicalMilestoneFilter, milestoneAliasToCanonical, filterAssignee, normalizedFilterLabels, filterPriority, filterType, filterProject, filterAskedBy]);
 
+  // The quick filter counts what it would show under the other filters.
+  const blockedTasks = useMemo(
+    () => tasksMatchingFilters.filter(task => blockedStates.has(task.id)),
+    [tasksMatchingFilters, blockedStates]
+  );
+  const filteredTasks = filterBlocked ? blockedTasks : tasksMatchingFilters;
+
   const currentFilters: BoardFilters = {
     assignee: filterAssignee,
     labels: normalizedFilterLabels,
@@ -341,6 +357,7 @@ const Board: React.FC<BoardProps> = ({
     taskType: filterType,
     project: filterProject,
     askedBy: filterAskedBy,
+    blocked: filterBlocked,
   };
   const changeFilters = (changes: Partial<BoardFilters>) => onFiltersChange?.({ ...currentFilters, ...changes });
 
@@ -721,34 +738,61 @@ const Board: React.FC<BoardProps> = ({
             + New Task
           </button>
         </div>
-        {(decisionQueues.questions.length > 0 || decisionQueues.proposals.length > 0) && (
-          <div className="flex flex-wrap gap-3" role="region" aria-label="Decisions waiting">
-            {decisionQueues.questions[0] && workflow.waitingStatus && (
-              <button
-                type="button"
-                onClick={() => onEditTask(decisionQueues.questions[0] as Task)}
-                className="group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-left transition-colors duration-150 hover:border-amber-400 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-amber-700 dark:bg-amber-950/30 dark:hover:bg-amber-950/50 sm:flex-none"
-              >
-                <span className="text-2xl font-bold tabular-nums text-amber-700 dark:text-amber-300">{decisionQueues.questions.length}</span>
-                <span className="min-w-0 flex-1 text-sm text-amber-900 dark:text-amber-100">
-                  <span className="block font-semibold">{workflow.waitingStatus}</span>
-                  <span className="block text-xs text-amber-800/80 dark:text-amber-200/80">unanswered questions</span>
-                </span>
-                <span className="rounded-md bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-amber-600 dark:bg-amber-600">Answer</span>
-              </button>
+        {(decisionQueues.questions.length > 0 || decisionQueues.proposals.length > 0 || blockedTasks.length > 0 || filterBlocked) && (
+          <div className="flex flex-wrap gap-3">
+            {(decisionQueues.questions.length > 0 || decisionQueues.proposals.length > 0) && (
+              <div className="contents" role="region" aria-label="Decisions waiting">
+                {decisionQueues.questions[0] && workflow.waitingStatus && (
+                  <button
+                    type="button"
+                    onClick={() => onEditTask(decisionQueues.questions[0] as Task)}
+                    className="group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-left transition-colors duration-150 hover:border-amber-400 hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:border-amber-700 dark:bg-amber-950/30 dark:hover:bg-amber-950/50 sm:flex-none"
+                  >
+                    <span className="text-2xl font-bold tabular-nums text-amber-700 dark:text-amber-300">{decisionQueues.questions.length}</span>
+                    <span className="min-w-0 flex-1 text-sm text-amber-900 dark:text-amber-100">
+                      <span className="block font-semibold">{workflow.waitingStatus}</span>
+                      <span className="block text-xs text-amber-800/80 dark:text-amber-200/80">unanswered questions</span>
+                    </span>
+                    <span className="rounded-md bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-amber-600 dark:bg-amber-600">Answer</span>
+                  </button>
+                )}
+                {decisionQueues.proposals[0] && workflow.proposalStatus && (
+                  <button
+                    type="button"
+                    onClick={() => onEditTask(decisionQueues.proposals[0] as Task)}
+                    className="group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-left transition-colors duration-150 hover:border-blue-300 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-blue-800 dark:bg-blue-950/30 dark:hover:bg-blue-950/50 sm:flex-none"
+                  >
+                    <span className="text-2xl font-bold tabular-nums text-blue-700 dark:text-blue-300">{decisionQueues.proposals.length}</span>
+                    <span className="min-w-0 flex-1 text-sm text-blue-900 dark:text-blue-100">
+                      <span className="block font-semibold">{workflow.proposalStatus}</span>
+                      <span className="block text-xs text-blue-800/80 dark:text-blue-200/80">proposals to approve or decline</span>
+                    </span>
+                    <span className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-blue-700">Review</span>
+                  </button>
+                )}
+              </div>
             )}
-            {decisionQueues.proposals[0] && workflow.proposalStatus && (
+            {onFiltersChange && (blockedTasks.length > 0 || filterBlocked) && (
               <button
                 type="button"
-                onClick={() => onEditTask(decisionQueues.proposals[0] as Task)}
-                className="group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-left transition-colors duration-150 hover:border-blue-300 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-blue-800 dark:bg-blue-950/30 dark:hover:bg-blue-950/50 sm:flex-none"
+                aria-pressed={filterBlocked}
+                onClick={() => changeFilters({ blocked: !filterBlocked })}
+                className={`group flex min-w-[15rem] flex-1 items-center gap-3 rounded-lg border px-4 py-3 text-left transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-red-500 sm:flex-none ${
+                  filterBlocked
+                    ? 'border-red-400 bg-red-100 dark:border-red-600 dark:bg-red-950/60'
+                    : 'border-red-200 bg-red-50 hover:border-red-300 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:hover:bg-red-950/50'
+                }`}
               >
-                <span className="text-2xl font-bold tabular-nums text-blue-700 dark:text-blue-300">{decisionQueues.proposals.length}</span>
-                <span className="min-w-0 flex-1 text-sm text-blue-900 dark:text-blue-100">
-                  <span className="block font-semibold">{workflow.proposalStatus}</span>
-                  <span className="block text-xs text-blue-800/80 dark:text-blue-200/80">proposals to approve or decline</span>
+                <span className="text-2xl font-bold tabular-nums text-red-700 dark:text-red-300">{blockedTasks.length}</span>
+                <span className="min-w-0 flex-1 text-sm text-red-900 dark:text-red-100">
+                  <span className="block font-semibold">Blocked</span>
+                  <span className="block text-xs text-red-800/80 dark:text-red-200/80">
+                    {filterBlocked ? 'only these are shown' : 'cards waiting on something'}
+                  </span>
                 </span>
-                <span className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-blue-700">Review</span>
+                <span className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-semibold text-white group-hover:bg-red-700 dark:bg-red-700 dark:group-hover:bg-red-600">
+                  {filterBlocked ? 'Show all' : 'Show'}
+                </span>
               </button>
             )}
           </div>
@@ -907,7 +951,7 @@ const Board: React.FC<BoardProps> = ({
                 {hasActiveFilters && (
                   <button
                     type="button"
-                    onClick={() => onFiltersChange({ assignee: '', labels: [], priority: '', taskType: '', project: '', askedBy: '' })}
+                    onClick={() => onFiltersChange({ assignee: '', labels: [], priority: '', taskType: '', project: '', askedBy: '', blocked: false })}
                     className={BOARD_FILTER_BUTTON_CLASS}
                   >
                     Clear filters
@@ -1006,6 +1050,7 @@ const Board: React.FC<BoardProps> = ({
                             onDragEnd={handleColumnDragEnd}
                             onCleanup={status === terminalStatus ? () => setShowCleanupModal(true) : undefined}
                             decisionKind={decisionKindFor(status, workflow)}
+                            blockedStates={blockedStates}
                             {...selectionProps}
                           />
                         </div>
@@ -1039,6 +1084,7 @@ const Board: React.FC<BoardProps> = ({
                   onDragEnd={handleColumnDragEnd}
                   onCleanup={status === terminalStatus ? () => setShowCleanupModal(true) : undefined}
                   decisionKind={decisionKindFor(status, workflow)}
+                  blockedStates={blockedStates}
                   {...selectionProps}
                 />
               </div>
